@@ -1,0 +1,16 @@
+node_modules/
+client/node_modules/
+server/node_modules/
+dist/
+client/dist/
+server/dist/
+.DS_Store
+.env
+.env.*
+client/.env
+client/.env.*
+server/.env
+server/.env.*
+server/tokens.db
+tokens.db
+*.db
