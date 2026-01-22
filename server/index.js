@@ -6,10 +6,16 @@ import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
+
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.path}`);
+  next();
+});
 
 const requiredEnv = ['SERVER_BASE_URL', 'ALLOWED_ORIGINS', 'MONDAY_CLIENT_ID', 'MONDAY_CLIENT_SECRET'];
 const missingEnv = requiredEnv.filter(k => !process.env[k]);
@@ -71,6 +77,8 @@ const saveToken = (id, token) =>
 const getToken = id =>
   db.prepare('SELECT token FROM tokens WHERE account_id = ?').get(id)?.token;
 
+const stateTokenMap = new Map();
+
 const rateWindowMs = 60_000;
 const rateMax = 120;
 const rateBuckets = new Map();
@@ -89,16 +97,21 @@ app.get('/health', (_, res) => {
   res.json({ ok: true, serverBaseUrl, redirectUri });
 });
 
-app.get('/auth/authorize', (_, res) => {
+app.get('/auth/authorize', (req, res) => {
+  console.log('[OAUTH] authorize start');
   const url = new URL('https://auth.monday.com/oauth2/authorize');
   url.searchParams.set('client_id', process.env.MONDAY_CLIENT_ID);
   url.searchParams.set('redirect_uri', redirectUri);
+  const state = crypto.randomBytes(16).toString('hex');
+  url.searchParams.set('state', state);
   res.redirect(url.toString());
 });
 
 app.get('/auth/callback', async (req, res) => {
-  const { code, error, error_description } = req.query;
+  console.log(`[OAUTH] callback hit hasCode=${Boolean(req.query.code)} hasState=${Boolean(req.query.state)} region=${req.query.region || ''}`);
+  const { code, error, error_description, state } = req.query;
   const authCode = Array.isArray(code) ? code[0] : code;
+  const stateValue = Array.isArray(state) ? state[0] : state;
   if (error) return res.status(400).send(String(error_description || error));
   if (!authCode) return res.status(400).send('Missing code');
   try {
@@ -108,10 +121,31 @@ app.get('/auth/callback', async (req, res) => {
       code: authCode,
       redirect_uri: redirectUri
     });
-    saveToken(r.data.account_id, r.data.access_token);
-    res.send('Authorized. Close window.');
+    const tokenAccountId = String(r.data.account_id || '');
+    if (!/^\d+$/.test(tokenAccountId)) {
+      console.log('OAuth exchange success account_id=missing stored=false');
+      return res.status(500).send('Missing account id');
+    }
+    saveToken(tokenAccountId, r.data.access_token);
+    console.log(`OAuth exchange success account_id=${tokenAccountId} stored=true`);
+    if (stateValue && String(stateValue).length > 0) {
+      stateTokenMap.set(String(stateValue), r.data.access_token);
+    }
+    res.send(`<!doctype html>
+<html>
+  <body>Authorized. You can close this tab.
+    <script>
+      try {
+        if (window.opener) {
+          window.opener.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
+        }
+      } catch (e) {}
+      try { window.close(); } catch (e) {}
+    </script>
+  </body>
+</html>`);
   } catch (err) {
-    console.error('OAuth token exchange failed', err.response?.status || err.message);
+    console.error(`[OAUTH] callback error ${err.message}`);
     res.status(500).send('OAuth exchange failed');
   }
 });
@@ -125,11 +159,151 @@ app.post('/api/graphql', rateLimit, async (req, res) => {
     return res.status(400).send('Invalid variables');
   }
   const token = getToken(accountId);
-  if (!token) return res.status(401).send('Not authorized');
+  if (!token) return res.status(401).json({ ok: false, error: 'NOT_AUTHORIZED' });
   const r = await axios.post('https://api.monday.com/v2', { query, variables }, {
     headers: { Authorization: token }
   });
   res.json(r.data);
+});
+
+app.get('/api/auth/status', (req, res) => {
+  const accountId = req.query?.accountId || req.body?.accountId;
+  if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
+    return res.status(400).send('Invalid accountId');
+  }
+  const token = getToken(accountId);
+  return res.json({ ok: true, authorized: Boolean(token) });
+});
+
+app.get('/__debug/ping', (_req, res) => {
+  console.log('[DBG] ping');
+  res.json({ ok: true, ts: Date.now() });
+});
+
+const truncateSnippet = (text, max = 120) => {
+  if (typeof text !== 'string') return '';
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1)}…`;
+};
+
+const countOccurrences = (text, find) => {
+  if (!text || !find) return 0;
+  let count = 0;
+  let idx = 0;
+  while (true) {
+    const next = text.indexOf(find, idx);
+    if (next === -1) break;
+    count += 1;
+    idx = next + find.length;
+  }
+  return count;
+};
+
+app.post('/api/preview', rateLimit, async (req, res) => {
+  const { accountId, boardId, find, replace } = req.body || {};
+  if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
+    return res.status(400).send('Invalid accountId');
+  }
+  if (typeof boardId !== 'number' && typeof boardId !== 'string') {
+    return res.status(400).send('Invalid boardId');
+  }
+  if (typeof find !== 'string' || find.trim().length === 0) {
+    return res.status(400).send('Find text is required');
+  }
+
+  const token = getToken(accountId);
+  if (!token) return res.status(401).json({ ok: false, error: 'NOT_AUTHORIZED' });
+
+  const boardIdValue = String(boardId);
+  const findText = find;
+  const replaceText = typeof replace === 'string' ? replace : '';
+
+  try {
+    const columnsQuery = `
+      query($id: ID!) {
+        boards(ids: [$id]) {
+          columns { id title type }
+        }
+      }
+    `;
+    const columnsRes = await axios.post('https://api.monday.com/v2', {
+      query: columnsQuery,
+      variables: { id: boardIdValue }
+    }, { headers: { Authorization: token } });
+
+    if (columnsRes.data?.errors?.length) {
+      return res.status(502).send('Failed to load board columns');
+    }
+
+    const columns = columnsRes.data?.data?.boards?.[0]?.columns || [];
+    const eligibleColumns = columns.filter(c => c.type === 'text' || c.type === 'long_text');
+    const eligibleIds = eligibleColumns.map(c => c.id);
+    const columnTitleById = new Map(eligibleColumns.map(c => [c.id, c.title]));
+
+    if (eligibleIds.length === 0) {
+      return res.json({ totalMatches: 0, totalItems: 0, rows: [] });
+    }
+
+    const rows = [];
+    let totalMatches = 0;
+    const itemIds = new Set();
+    let cursor = null;
+
+    const itemsQuery = `
+      query($id: ID!, $cursor: String, $columnIds: [String!]) {
+        boards(ids: [$id]) {
+          items_page(limit: 500, cursor: $cursor) {
+            cursor
+            items {
+              id
+              name
+              column_values(ids: $columnIds) { id text }
+            }
+          }
+        }
+      }
+    `;
+
+    do {
+      const itemsRes = await axios.post('https://api.monday.com/v2', {
+        query: itemsQuery,
+        variables: { id: boardIdValue, cursor, columnIds: eligibleIds }
+      }, { headers: { Authorization: token } });
+
+      if (itemsRes.data?.errors?.length) {
+        return res.status(502).send('Failed to load board items');
+      }
+
+      const page = itemsRes.data?.data?.boards?.[0]?.items_page;
+      const items = page?.items || [];
+      cursor = page?.cursor || null;
+
+      for (const item of items) {
+        for (const col of item.column_values || []) {
+          const text = col?.text || '';
+          if (!text.includes(findText)) continue;
+          const matchCount = countOccurrences(text, findText);
+          if (matchCount === 0) continue;
+          totalMatches += matchCount;
+          itemIds.add(item.id);
+          rows.push({
+            itemId: item.id,
+            itemName: item.name,
+            columnId: col.id,
+            columnTitle: columnTitleById.get(col.id) || col.id,
+            before: truncateSnippet(text),
+            after: truncateSnippet(text.split(findText).join(replaceText))
+          });
+        }
+      }
+    } while (cursor);
+
+    console.log(`Preview: board ${boardIdValue}, matches ${totalMatches}, items ${itemIds.size}`);
+    return res.json({ totalMatches, totalItems: itemIds.size, rows });
+  } catch (err) {
+    console.error('Preview failed', err.response?.status || err.message);
+    return res.status(500).send('Preview failed');
+  }
 });
 
 app.listen(port, () => console.log(`Server on ${port}`));
