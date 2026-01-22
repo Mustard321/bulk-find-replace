@@ -17,6 +17,11 @@ app.use((req, _res, next) => {
   next();
 });
 
+app.get('/__debug/ping', (_req, res) => {
+  console.log('[DBG] ping');
+  res.json({ ok: true, ts: Date.now() });
+});
+
 const requiredEnv = ['SERVER_BASE_URL', 'ALLOWED_ORIGINS', 'MONDAY_CLIENT_ID', 'MONDAY_CLIENT_SECRET'];
 const missingEnv = requiredEnv.filter(k => !process.env[k]);
 if (missingEnv.length) {
@@ -108,7 +113,7 @@ app.get('/auth/authorize', (req, res) => {
 });
 
 app.get('/auth/callback', async (req, res) => {
-  console.log(`[OAUTH] callback hit hasCode=${Boolean(req.query.code)} hasState=${Boolean(req.query.state)} region=${req.query.region || ''}`);
+  console.log(`[OAUTH] callback hit hasCode=${Boolean(req.query.code)} hasState=${Boolean(req.query.state)}`);
   const { code, error, error_description, state } = req.query;
   const authCode = Array.isArray(code) ? code[0] : code;
   const stateValue = Array.isArray(state) ? state[0] : state;
@@ -127,7 +132,7 @@ app.get('/auth/callback', async (req, res) => {
       return res.status(500).send('Missing account id');
     }
     saveToken(tokenAccountId, r.data.access_token);
-    console.log(`OAuth exchange success account_id=${tokenAccountId} stored=true`);
+    console.log(`[OAUTH] token ok account_id=${tokenAccountId}`);
     if (stateValue && String(stateValue).length > 0) {
       stateTokenMap.set(String(stateValue), r.data.access_token);
     }
@@ -173,11 +178,6 @@ app.get('/api/auth/status', (req, res) => {
   }
   const token = getToken(accountId);
   return res.json({ ok: true, authorized: Boolean(token) });
-});
-
-app.get('/__debug/ping', (_req, res) => {
-  console.log('[DBG] ping');
-  res.json({ ok: true, ts: Date.now() });
 });
 
 const truncateSnippet = (text, max = 120) => {
