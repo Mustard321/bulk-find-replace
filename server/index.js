@@ -116,15 +116,16 @@ const mondayAuth = (req, res, next) => {
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
     const secret = process.env.MONDAY_SIGNING_SECRET;
 
+    const secretLen = secret ? String(secret).length : 0;
     if (!token) {
       if (process.env.NODE_ENV !== 'production') {
-        console.warn('[mondayAuth] missing token', { hasAuthHeader: !!authHeader });
+        console.warn('[mondayAuth] missing token', { hasAuthHeader: !!authHeader, secretLen });
       }
       return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_TOKEN' });
     }
     if (!secret) {
       if (process.env.NODE_ENV !== 'production') {
-        console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET');
+        console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET', { secretLen });
       }
       return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET' });
     }
@@ -134,13 +135,17 @@ const mondayAuth = (req, res, next) => {
     return next();
   } catch (e) {
     if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] jwt.verify failed', { message: e?.message });
+      console.warn('[mondayAuth] jwt.verify failed', { name: e?.name, message: e?.message });
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'VERIFY_FAILED' });
   }
 };
 
 app.get('/api/auth-check', mondayAuth, (req, res) => {
+  res.json({ ok: true, monday: req.monday });
+});
+
+app.get('/api/debug/verify', mondayAuth, (req, res) => {
   res.json({ ok: true, monday: req.monday });
 });
 
