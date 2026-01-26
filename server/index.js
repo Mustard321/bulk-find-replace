@@ -114,9 +114,9 @@ const mondayAuth = (req, res, next) => {
   try {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const secret = process.env.MONDAY_SIGNING_SECRET;
-
+    const secret = (process.env.MONDAY_SIGNING_SECRET || '').trim();
     const secretLen = secret ? String(secret).length : 0;
+
     if (!token) {
       if (process.env.NODE_ENV !== 'production') {
         console.warn('[mondayAuth] missing token', { hasAuthHeader: !!authHeader, secretLen });
@@ -134,9 +134,8 @@ const mondayAuth = (req, res, next) => {
     req.monday = decoded;
     return next();
   } catch (e) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] jwt.verify failed', { name: e?.name, message: e?.message });
-    }
+    const secretLen = (process.env.MONDAY_SIGNING_SECRET || '').trim().length;
+    console.warn(`[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen}`);
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'VERIFY_FAILED' });
   }
 };
@@ -367,4 +366,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
   }
 });
 
-app.listen(port, () => console.log(`Server on ${port}`));
+app.listen(port, () => {
+  const version = process.env.APP_VERSION || 'unknown';
+  console.log(`Server on ${port} version=${version}`);
+});
