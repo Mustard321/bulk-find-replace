@@ -26,6 +26,10 @@ app.get('/__debug/authorize-config', (_req, res) => {
   res.json({ ok: true, requiresAccountId: true, stateFormat: '<accountId>.<nonce>' });
 });
 
+app.get('/__debug/version', (_req, res) => {
+  res.json({ ok: true, sha: '50cde4b' });
+});
+
 const requiredEnv = ['SERVER_BASE_URL', 'ALLOWED_ORIGINS', 'MONDAY_CLIENT_ID', 'MONDAY_CLIENT_SECRET'];
 const missingEnv = requiredEnv.filter(k => !process.env[k]);
 if (missingEnv.length) {
