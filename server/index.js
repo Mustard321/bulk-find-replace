@@ -136,7 +136,12 @@ const mondayAuth = (req, res, next) => {
   } catch (e) {
     const secretLen = (process.env.MONDAY_SIGNING_SECRET || '').trim().length;
     console.warn(`[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen}`);
-    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'VERIFY_FAILED' });
+    return res.status(401).json({
+      ok: false,
+      error: 'UNAUTHORIZED',
+      reason: 'VERIFY_FAILED',
+      detail: e?.message || ''
+    });
   }
 };
 
@@ -146,6 +151,15 @@ app.get('/api/auth-check', mondayAuth, (req, res) => {
 
 app.get('/api/debug/verify', mondayAuth, (req, res) => {
   res.json({ ok: true, monday: req.monday });
+});
+
+app.get('/api/debug/whoami', mondayAuth, (req, res) => {
+  res.json({
+    ok: true,
+    appId: req.monday?.dat?.app_id,
+    accountId: req.monday?.dat?.account_id,
+    userId: req.monday?.dat?.user_id
+  });
 });
 
 app.get('/health', (_, res) => {
