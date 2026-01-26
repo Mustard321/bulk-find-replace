@@ -79,14 +79,16 @@ const isAllowedOrigin = origin => {
   return false;
 };
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
     if (isAllowedOrigin(origin)) return cb(null, true);
     return cb(new Error('Not allowed by CORS'));
   },
   allowedHeaders: ['Content-Type', 'Authorization'],
   methods: ['GET', 'POST', 'OPTIONS']
-}));
+};
+app.use(cors(corsOptions));
+app.options('/api/*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
 const dbPath = process.env.TOKENS_DB_PATH || './tokens.db';
@@ -114,37 +116,63 @@ const rateLimit = (req, res, next) => {
   next();
 };
 
+const buildAuthDebug = ({ authHeader, token, startsWithBearer }) => {
+  const trimmedToken = token.trim();
+  const hasDots = trimmedToken.split('.').length === 3;
+  const tokenType = startsWithBearer ? 'bearer' : (authHeader ? 'raw' : 'none');
+  return {
+    authHeaderPresent: Boolean(authHeader),
+    tokenType,
+    tokenLength: trimmedToken.length,
+    hasDots,
+    startsWithBearer
+  };
+};
+
 const mondayAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization || '';
+  const startsWithBearer = authHeader.startsWith('Bearer ');
+  const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
+  const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
+  const secret = (process.env.MONDAY_CLIENT_SECRET || '').trim();
+  const secretLen = secret.length;
+
+  if (!token) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('[mondayAuth] missing token', { secretLen, ...debug });
+    }
+    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_TOKEN', debug });
+  }
+  if (!debug.hasDots) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('[mondayAuth] token not jwt', { secretLen, ...debug });
+    }
+    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'TOKEN_NOT_JWT', debug });
+  }
+  if (!secret) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('[mondayAuth] missing MONDAY_CLIENT_SECRET', { secretLen });
+    }
+    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET', debug });
+  }
+
   try {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const secret = (process.env.MONDAY_CLIENT_SECRET || '').trim();
-    const secretLen = secret ? String(secret).length : 0;
-
-    if (!token) {
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn('[mondayAuth] missing token', { hasAuthHeader: !!authHeader, secretLen });
-      }
-      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_TOKEN' });
-    }
-    if (!secret) {
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn('[mondayAuth] missing MONDAY_CLIENT_SECRET', { secretLen });
-      }
-      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET' });
-    }
-
     const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
     req.mondayJwt = decoded;
     req.mondayDat = decoded?.dat || decoded?.data?.dat || null;
     return next();
   } catch (e) {
-    const secretLen = (process.env.MONDAY_CLIENT_SECRET || '').trim().length;
-    console.warn(`[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen}`);
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn(
+        `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen}`,
+        debug
+      );
+    }
     return res.status(401).json({
       ok: false,
       error: 'UNAUTHORIZED',
-      reason: e?.name || 'VERIFY_FAILED'
+      reason: e?.name || 'VERIFY_FAILED',
+      debug
     });
   }
 };
@@ -158,19 +186,31 @@ app.get('/api/debug/verify', mondayAuth, (req, res) => {
   res.json({
     ok: true,
     dat,
+    decodedKeys: Object.keys(req.mondayJwt || {}),
     user_id: dat?.user_id,
     account_id: dat?.account_id,
     app_id: dat?.app_id
   });
 });
 
+app.get('/api/debug/echo-auth', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const startsWithBearer = authHeader.startsWith('Bearer ');
+  const token = startsWithBearer ? authHeader.slice(7) : authHeader;
+  const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
+  res.json({ ok: true, debug });
+});
+
 app.get('/api/debug/whoami', mondayAuth, (req, res) => {
   const dat = req.mondayDat || null;
+  const jwt = req.mondayJwt || {};
   res.json({
     ok: true,
-    appId: dat?.app_id,
-    accountId: dat?.account_id,
-    userId: dat?.user_id
+    dat,
+    jwtKeys: Object.keys(req.mondayJwt || {}),
+    appId: dat?.app_id || jwt?.app_id,
+    accountId: dat?.account_id || jwt?.account_id,
+    userId: dat?.user_id || jwt?.user_id
   });
 });
 

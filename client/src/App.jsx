@@ -3,9 +3,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import mondaySdk from 'monday-sdk-js';
 
 export default function App() {
-  const monday = useMemo(() => mondaySdk(), []);
-  const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
-  const hasApiBase = Boolean(API_BASE);
+  const monday = useMemo(() => (window.mondaySdk ? window.mondaySdk() : mondaySdk()), []);
+  const rawApiBase = import.meta.env.VITE_API_BASE_URL || '';
+  const API_BASE = rawApiBase || 'https://bulk-find-replace-server.onrender.com';
+  const hasApiBase = Boolean(rawApiBase);
   const [ctx,setCtx]=useState(null);
   const [ctxRaw,setCtxRaw]=useState(null);
   const [ctxErr,setCtxErr]=useState(null);
@@ -19,6 +20,11 @@ export default function App() {
   const [authRequired,setAuthRequired]=useState(false);
   const [boardId,setBoardId]=useState(null);
   const [oauthAccountId,setOauthAccountId]=useState('');
+  const [sessionTokenInfo,setSessionTokenInfo]=useState({
+    present: false,
+    looksJwt: false,
+    masked: ''
+  });
   const authPollRef = React.useRef(null);
 
   useEffect(() => {
@@ -81,7 +87,7 @@ export default function App() {
       if (e?.data?.type !== 'BFR_OAUTH_OK') return;
       const accountId = String(e.data.accountId || '');
       if (accountId) setOauthAccountId(accountId);
-      if (!hasApiBase || !accountId) return;
+      if (!accountId) return;
       fetch(`${API_BASE}/api/auth/status?accountId=${encodeURIComponent(accountId)}`)
         .then(r => r.ok ? r.json() : null)
         .then(d => {
@@ -118,36 +124,61 @@ export default function App() {
     }, 1000);
   };
 
+  const formatTokenInfo = (token) => {
+    const safe = token || '';
+    const looksJwt = safe.split('.').length === 3;
+    const masked = safe.length > 24
+      ? `${safe.slice(0, 12)}…${safe.slice(-8)}`
+      : (safe ? `${safe.slice(0, 6)}…` : '');
+    return { present: Boolean(safe), looksJwt, masked };
+  };
+
+  const getSessionToken = async () => {
+    try {
+      const tokenRes = await monday.get('sessionToken');
+      const token = tokenRes?.data || '';
+      setSessionTokenInfo(formatTokenInfo(token));
+      return token || null;
+    } catch {
+      setSessionTokenInfo({ present: false, looksJwt: false, masked: '' });
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!ctxRaw) return;
+    getSessionToken();
+  }, [ctxRaw]);
+
   async function previewRun(){
     setError('');
     setAuthRequired(false);
     setPreview([]);
     setSummary({ totalMatches: 0, totalItems: 0 });
     setPreviewLoading(true);
-    if (!hasApiBase) {
-      setError('Missing VITE_API_BASE_URL.');
-      setPreviewLoading(false);
-      return;
-    }
     if (!accountId || !boardId) {
       setError('Missing board context (boardId).');
       setPreviewLoading(false);
       return;
     }
-    let sessionToken = '';
-    try {
-      const tokenRes = await monday.get('sessionToken');
-      sessionToken = tokenRes?.data || '';
-    } catch {
-      setError('Missing Monday session token.');
-      setPreviewLoading(false);
-      return;
-    }
+    const sessionToken = await getSessionToken();
     if (!sessionToken) {
-      setError('Missing Monday session token.');
+      setError('No Monday session token. Open the app inside Monday.');
       setPreviewLoading(false);
       return;
     }
+    if (sessionToken.split('.').length !== 3) {
+      setError('Session token is not a JWT. Open the app inside Monday.');
+      setPreviewLoading(false);
+      return;
+    }
+    let inIframe = true;
+    try {
+      inIframe = window.self !== window.top;
+    } catch {
+      inIframe = true;
+    }
+    console.debug('[BFR] preview', { inIframe, tokenLen: sessionToken.length, apiBase: API_BASE });
     try {
       const r = await fetch(`${API_BASE}/api/preview`,{
         method:'POST',
@@ -199,9 +230,9 @@ export default function App() {
   }
 
   const accountId = oauthAccountId;
-  const previewDisabled = !hasApiBase || !boardId || !find || previewLoading || loading || !accountId;
+  const previewDisabled = !boardId || !find || previewLoading || loading || !accountId;
   const hasAccountId = Boolean(accountId);
-  const authorizeUrl = hasApiBase && hasAccountId
+  const authorizeUrl = hasAccountId
     ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}`
     : '';
   const ctxAccountId =
@@ -224,6 +255,11 @@ export default function App() {
         </div>
         <div>apiBaseUrl: {API_BASE || '(missing)'}</div>
         <div>accountId: {accountId || '(missing)'}</div>
+        <div>
+          sessionToken present: {String(sessionTokenInfo.present)}{' '}
+          jwt: {String(sessionTokenInfo.looksJwt)}{' '}
+          token: {sessionTokenInfo.masked || '(missing)'}
+        </div>
         <div>ctxLoaded: {String(Boolean(ctxRaw))}</div>
         <div>ctxAccountId: {ctxAccountId || '(missing)'}</div>
         <div>ctxErr: {ctxErr || ''}</div>
@@ -242,10 +278,6 @@ export default function App() {
           <div>{error === 'Not authorized yet — click Authorize.' ? error : 'Authorization required.'}</div>
           <button
             onClick={()=>{
-              if (!hasApiBase) {
-                setError('Missing VITE_API_BASE_URL.');
-                return;
-              }
               if (!hasAccountId) {
                 setError('Missing accountId.');
                 alert('Missing accountId from Monday context. Open console and screenshot debug box.');
@@ -254,7 +286,7 @@ export default function App() {
               monday.execute('openLink', { url: authorizeUrl, target: 'newTab' });
               startAuthPoll(accountId);
             }}
-            disabled={!hasApiBase || !hasAccountId}
+            disabled={!hasAccountId}
           >
             Authorize
           </button>
