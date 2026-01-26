@@ -212,6 +212,20 @@ app.get('/api/debug/env-fp', (_req, res) => {
   });
 });
 
+app.get('/api/debug/env-check', (_req, res) => {
+  res.json({
+    signingPresent: Boolean(signingSecret),
+    signingLen: signingSecretLen,
+    signingFp: signingSecretFp,
+    clientPresent: Boolean(clientSecret),
+    clientLen: clientSecretLen,
+    clientFp: clientSecretFp,
+    areEqual: signingSecret === clientSecret,
+    nodeEnv: process.env.NODE_ENV || null,
+    commitSha: process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || null
+  });
+});
+
 app.get('/api/debug/which-secret', (req, res) => {
   const authHeader = req.headers.authorization || '';
   const startsWithBearer = authHeader.startsWith('Bearer ');
