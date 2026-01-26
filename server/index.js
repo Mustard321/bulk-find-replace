@@ -145,9 +145,9 @@ const mondayAuth = (req, res, next) => {
   const startsWithBearer = authHeader.startsWith('Bearer ');
   const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
   const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
-  const secret = (process.env.MONDAY_SIGNING_SECRET || '').trim();
-  const secretLen = secret.length;
-  const secretFp = secretFingerprint(secret);
+  const signing = (process.env.MONDAY_SIGNING_SECRET || '').trim();
+  const secretLen = signing.length;
+  const secretFp = secretFingerprint(signing);
 
   if (!token) {
     if (process.env.NODE_ENV !== 'production') {
@@ -161,7 +161,7 @@ const mondayAuth = (req, res, next) => {
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'TOKEN_NOT_JWT', debug });
   }
-  if (!secret) {
+  if (!signing) {
     if (process.env.NODE_ENV !== 'production') {
       console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET', { secretLen, secretFp });
     }
@@ -169,7 +169,7 @@ const mondayAuth = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
+    const decoded = jwt.verify(token.trim(), signing, { algorithms: ['HS256'] });
     req.mondayJwt = decoded;
     req.mondayDat = decoded?.dat || decoded?.data?.dat || null;
     console.log('[mondayAuth] verify ok', {
@@ -209,6 +209,53 @@ app.get('/api/debug/env-fp', (_req, res) => {
     clientPresent: Boolean(clientSecret),
     clientLen: clientSecretLen,
     clientFp: clientSecretFp
+  });
+});
+
+app.get('/api/debug/which-secret', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const startsWithBearer = authHeader.startsWith('Bearer ');
+  const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
+  const tokenLooksJwt = token.split('.').length === 3;
+  if (!tokenLooksJwt) {
+    return res.json({
+      ok: false,
+      verifiedWith: null,
+      signingWorked: false,
+      clientWorked: false,
+      tokenLooksJwt
+    });
+  }
+  const signing = (process.env.MONDAY_SIGNING_SECRET || '').trim();
+  const client = (process.env.MONDAY_CLIENT_SECRET || '').trim();
+  let signingWorked = false;
+  let clientWorked = false;
+  try {
+    jwt.verify(token, signing, { algorithms: ['HS256'] });
+    signingWorked = true;
+  } catch {
+    signingWorked = false;
+  }
+  if (!signingWorked) {
+    try {
+      jwt.verify(token, client, { algorithms: ['HS256'] });
+      clientWorked = true;
+    } catch {
+      clientWorked = false;
+    }
+  }
+  if (signingWorked) {
+    return res.json({ ok: true, verifiedWith: 'SIGNING' });
+  }
+  if (clientWorked) {
+    return res.json({ ok: true, verifiedWith: 'CLIENT' });
+  }
+  return res.json({
+    ok: false,
+    verifiedWith: null,
+    signingWorked,
+    clientWorked,
+    tokenLooksJwt
   });
 });
 
