@@ -79,7 +79,9 @@ app.use(cors({
   origin: (origin, cb) => {
     if (isAllowedOrigin(origin)) return cb(null, true);
     return cb(new Error('Not allowed by CORS'));
-  }
+  },
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'OPTIONS']
 }));
 app.use(express.json({ limit: '1mb' }));
 
@@ -112,20 +114,35 @@ const mondayAuth = (req, res, next) => {
   try {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    if (!token) {
-      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED' });
-    }
     const secret = process.env.MONDAY_SIGNING_SECRET;
-    if (!secret) {
-      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED' });
+
+    if (!token) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[mondayAuth] missing token', { hasAuthHeader: !!authHeader });
+      }
+      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_TOKEN' });
     }
+    if (!secret) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET');
+      }
+      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET' });
+    }
+
     const decoded = jwt.verify(token, secret);
     req.monday = decoded;
     return next();
-  } catch {
-    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED' });
+  } catch (e) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('[mondayAuth] jwt.verify failed', { message: e?.message });
+    }
+    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'VERIFY_FAILED' });
   }
 };
+
+app.get('/api/auth-check', mondayAuth, (req, res) => {
+  res.json({ ok: true, monday: req.monday });
+});
 
 app.get('/health', (_, res) => {
   res.json({ ok: true, serverBaseUrl, redirectUri });
