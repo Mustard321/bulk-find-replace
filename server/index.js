@@ -4,6 +4,7 @@ import cors from 'cors';
 import axios from 'axios';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
@@ -105,6 +106,25 @@ const rateLimit = (req, res, next) => {
   rateBuckets.set(key, recent);
   if (recent.length > rateMax) return res.status(429).send('Too many requests');
   next();
+};
+
+const mondayAuth = (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (!token) {
+      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED' });
+    }
+    const secret = process.env.MONDAY_SIGNING_SECRET;
+    if (!secret) {
+      return res.status(401).json({ ok: false, error: 'UNAUTHORIZED' });
+    }
+    const decoded = jwt.verify(token, secret);
+    req.monday = decoded;
+    return next();
+  } catch {
+    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED' });
+  }
 };
 
 app.get('/health', (_, res) => {
@@ -215,7 +235,7 @@ const countOccurrences = (text, find) => {
   return count;
 };
 
-app.post('/api/preview', rateLimit, async (req, res) => {
+app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
   const { accountId, boardId, find, replace } = req.body || {};
   if (!accountId) {
     return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });

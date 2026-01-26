@@ -131,10 +131,25 @@ export default function App() {
       setError('Missing board context (boardId).');
       return;
     }
+    let sessionToken = '';
+    try {
+      const tokenRes = await monday.get('sessionToken');
+      sessionToken = tokenRes?.data || '';
+    } catch {
+      setError('Missing Monday session token.');
+      return;
+    }
+    if (!sessionToken) {
+      setError('Missing Monday session token.');
+      return;
+    }
     setPreviewLoading(true);
     const r = await fetch(`${API_BASE}/api/preview`,{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{
+        'Content-Type':'application/json',
+        Authorization:`Bearer ${sessionToken}`
+      },
       body:JSON.stringify({
         accountId,
         boardId,
