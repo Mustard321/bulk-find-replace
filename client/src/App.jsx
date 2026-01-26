@@ -1,387 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import mondaySdk from 'monday-sdk-js';
 import './App.css';
+import TopBar from './components/TopBar';
+import Stepper from './components/Stepper';
+import ScopeCard from './components/ScopeCard';
+import FindReplaceForm from './components/FindReplaceForm';
+import PreviewPanel from './components/PreviewPanel';
+import ConfirmModal from './components/ConfirmModal';
+import Toast from './components/Toast';
+import useDebouncedValue from './utils/useDebouncedValue';
 
-const STEP_LABELS = ['Choose scope', 'Find & replace', 'Preview & apply'];
 const PAGE_SIZE = 20;
-
-const useDebouncedValue = (value, delay = 250) => {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const handle = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(handle);
-  }, [value, delay]);
-  return debounced;
-};
-
-const LogoWordmark = () => (
-  <div className="wordmark" aria-label="mustard">
-    <span className="wordmark__primary">mustard</span>
-  </div>
-);
-
-const TopBar = ({ onHelp }) => (
-  <header className="topbar">
-    <div className="topbar__brand">
-      <LogoWordmark />
-      <div className="topbar__subtitle">Bulk Find &amp; Replace</div>
-    </div>
-    <button className="ghost-button" type="button" onClick={onHelp}>
-      What this does
-    </button>
-  </header>
-);
-
-const Stepper = ({ currentStep }) => (
-  <div className="stepper" role="list">
-    {STEP_LABELS.map((label, index) => {
-      const stepIndex = index + 1;
-      const isActive = stepIndex === currentStep;
-      const isComplete = stepIndex < currentStep;
-      return (
-        <div key={label} className={`stepper__step ${isActive ? 'is-active' : ''} ${isComplete ? 'is-complete' : ''}`} role="listitem">
-          <div className="stepper__badge">{stepIndex}</div>
-          <div className="stepper__label">{label}</div>
-        </div>
-      );
-    })}
-  </div>
-);
+const APPLY_AVAILABLE = false;
 
 const InlineNotice = ({ tone = 'neutral', children }) => (
-  <div className={"notice notice--" + tone} role={tone === 'error' ? 'alert' : 'status'}>
+  <div className={`notice notice--${tone} surface-2`} role={tone === 'error' ? 'alert' : 'status'}>
     {children}
-  </div>
-);
-
-const Modal = ({ title, children, onClose }) => {
-  const modalRef = useRef(null);
-  useEffect(() => {
-    const el = modalRef.current;
-    if (!el) return;
-    const focusable = el.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    first?.focus();
-    const handleKey = (event) => {
-      if (event.key === 'Escape') onClose();
-      if (event.key !== 'Tab' || focusable.length === 0) return;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      }
-      if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    el.addEventListener('keydown', handleKey);
-    return () => el.removeEventListener('keydown', handleKey);
-  }, [onClose]);
-
-  return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()} ref={modalRef}>
-        <div className="modal__header">
-          <h3>{title}</h3>
-          <button className="ghost-button" type="button" onClick={onClose}>
-            Close
-          </button>
-        </div>
-        <div className="modal__body">{children}</div>
-      </div>
-    </div>
-  );
-};
-
-const ScopeSelector = ({ boardId, ctxLoaded }) => (
-  <section className="card card--padded">
-    <div className="section-header">
-      <h2>Step 1 · Choose scope</h2>
-      <span className="pill">Safe</span>
-    </div>
-    <div className="scope-grid">
-      <div className="scope-item">
-        <div className="scope-label">Board</div>
-        <div className="scope-value">{ctxLoaded ? (boardId || 'Waiting for board') : 'Loading context…'}</div>
-        <div className="scope-hint">Bulk find &amp; replace runs on the active board.</div>
-      </div>
-      <div className="scope-item is-muted">
-        <div className="scope-label">Columns</div>
-        <div className="scope-value">All text + long text columns</div>
-        <div className="scope-hint">Auto-selected to keep results consistent.</div>
-      </div>
-      <div className="scope-item is-muted">
-        <div className="scope-label">Filters</div>
-        <div className="scope-value">Optional</div>
-        <div className="scope-hint">Filtering is coming soon.</div>
-      </div>
-    </div>
-  </section>
-);
-
-const FindReplaceForm = ({ find, replace, setFind, setReplace, onPreview, previewDisabled, previewLoading }) => (
-  <section className="card card--padded">
-    <div className="section-header">
-      <h2>Step 2 · Find &amp; replace</h2>
-      <span className="pill">Safe</span>
-    </div>
-    <div className="form-grid">
-      <label className="field">
-        <span className="field__label">Find</span>
-        <input
-          value={find}
-          onChange={(e) => setFind(e.target.value)}
-          placeholder="Text to find"
-        />
-      </label>
-      <label className="field">
-        <span className="field__label">Replace with</span>
-        <input
-          value={replace}
-          onChange={(e) => setReplace(e.target.value)}
-          placeholder="Replacement text (optional)"
-        />
-      </label>
-      <div className="form-actions">
-        <button className="primary-button" type="button" onClick={onPreview} disabled={previewDisabled}>
-          {previewLoading ? 'Previewing…' : 'Preview changes'}
-        </button>
-        <div className="form-note">Preview is a safe dry run. No changes are applied yet.</div>
-      </div>
-    </div>
-  </section>
-);
-
-const SummaryCard = ({ label, value }) => (
-  <div className="summary-card">
-    <div className="summary-card__label">{label}</div>
-    <div className="summary-card__value">{value}</div>
-  </div>
-);
-
-const highlightText = (text, term) => {
-  if (!term) return [text];
-  const parts = String(text).split(term);
-  return parts.flatMap((part, index) => {
-    if (index === parts.length - 1) return [part];
-    return [
-      part,
-      <mark key={`${part}-${index}`} className="diff-highlight">
-        {term}
-      </mark>
-    ];
-  });
-};
-
-const DiffRow = ({ row, find, replace, compact }) => (
-  <div className={`diff-row ${compact ? 'is-compact' : ''}`}>
-    <div className="diff-meta">
-      <div className="diff-title">{row.itemName}</div>
-      <div className="diff-subtitle">{row.columnTitle}</div>
-    </div>
-    <div className="diff-values">
-      <div className="diff-cell">
-        <div className="diff-label">Before</div>
-        <div className="diff-text">{highlightText(row.before || '—', find)}</div>
-      </div>
-      <div className="diff-cell">
-        <div className="diff-label">After</div>
-        <div className="diff-text">{highlightText(row.after || '—', replace || '')}</div>
-      </div>
-    </div>
-  </div>
-);
-
-const PreviewPanel = ({
-  preview,
-  summary,
-  previewLoading,
-  searchInput,
-  setSearchInput,
-  showOnlyChanged,
-  setShowOnlyChanged,
-  compactView,
-  setCompactView,
-  page,
-  setPage,
-  filteredRows,
-  pageRows
-}) => {
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
-
-  return (
-    <section className="card card--padded">
-      <div className="section-header">
-        <h2>Step 3 · Preview &amp; apply</h2>
-        <span className="pill pill--warn">Destructive</span>
-      </div>
-      <div className="summary-grid">
-        <SummaryCard label="Items matched" value={summary.totalItems} />
-        <SummaryCard label="Fields affected" value={preview.length} />
-        <SummaryCard label="Estimated changes" value={summary.totalMatches} />
-      </div>
-
-      <div className="preview-toolbar">
-        <label className="search-field">
-          <span className="sr-only">Search preview</span>
-          <input
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search within preview"
-          />
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={showOnlyChanged}
-            onChange={(e) => setShowOnlyChanged(e.target.checked)}
-          />
-          <span>Show only changed</span>
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={compactView}
-            onChange={(e) => setCompactView(e.target.checked)}
-          />
-          <span>Compact view</span>
-        </label>
-      </div>
-
-      {previewLoading && (
-        <div className="skeleton-stack">
-          {Array.from({ length: 4 }).map((_, idx) => (
-            <div className="skeleton" key={`skeleton-${idx}`} />
-          ))}
-        </div>
-      )}
-
-      {!previewLoading && preview.length === 0 && (
-        <InlineNotice tone="neutral">No preview results yet. Run a preview to see changes.</InlineNotice>
-      )}
-
-      {!previewLoading && preview.length > 0 && filteredRows.length === 0 && (
-        <InlineNotice tone="neutral">No rows match the current filters.</InlineNotice>
-      )}
-
-      {!previewLoading && pageRows.length > 0 && (
-        <div className="diff-list">
-          {pageRows.map((row, index) => (
-            <DiffRow key={`${row.itemId}-${row.columnId}-${index}`} row={row} find={row.findTerm} replace={row.replaceTerm} compact={compactView} />
-          ))}
-        </div>
-      )}
-
-      {!previewLoading && filteredRows.length > PAGE_SIZE && (
-        <div className="pagination">
-          <button className="ghost-button" type="button" onClick={() => setPage(Math.max(1, page - 1))} disabled={page === 1}>
-            Previous
-          </button>
-          <div className="pagination__status">
-            Page {page} of {totalPages}
-          </div>
-          <button className="ghost-button" type="button" onClick={() => setPage(Math.min(totalPages, page + 1))} disabled={page === totalPages}>
-            Next
-          </button>
-        </div>
-      )}
-    </section>
-  );
-};
-
-const ApplyConfirmModal = ({ summary, onClose, onConfirm }) => {
-  const [confirmed, setConfirmed] = useState(false);
-  return (
-    <Modal title="Confirm apply" onClose={onClose}>
-      <div className="modal-content">
-        <p>Review the impact before applying changes.</p>
-        <div className="modal-summary">
-          <SummaryCard label="Items" value={summary.totalItems} />
-          <SummaryCard label="Matches" value={summary.totalMatches} />
-        </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={confirmed}
-            onChange={(e) => setConfirmed(e.target.checked)}
-          />
-          <span>I understand this will modify {summary.totalItems} items.</span>
-        </label>
-        <InlineNotice tone="neutral">Dry run only in this build. No changes are applied.</InlineNotice>
-        <div className="modal-actions">
-          <button className="ghost-button" type="button" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="primary-button" type="button" disabled={!confirmed} onClick={onConfirm}>
-            Apply changes
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-const DiagnosticsPanel = ({ error, lastRequest, apiBase, sessionTokenInfo, authorizeUrl }) => (
-  <details className="diagnostics">
-    <summary>Diagnostics</summary>
-    <div className="diagnostics__grid">
-      <div>
-        <div className="diagnostics__label">Message</div>
-        <div className="diagnostics__value">{error || 'None'}</div>
-      </div>
-      <div>
-        <div className="diagnostics__label">Request id/time</div>
-        <div className="diagnostics__value">
-          {lastRequest ? `${lastRequest.id} · ${lastRequest.time}` : '—'}
-        </div>
-      </div>
-      <div>
-        <div className="diagnostics__label">Endpoint</div>
-        <div className="diagnostics__value">{lastRequest?.endpoint || '—'}</div>
-      </div>
-      <div>
-        <div className="diagnostics__label">Status code</div>
-        <div className="diagnostics__value">{lastRequest?.status || '—'}</div>
-      </div>
-      <div>
-        <div className="diagnostics__label">API base</div>
-        <div className="diagnostics__value">{apiBase || '—'}</div>
-      </div>
-      <div>
-        <div className="diagnostics__label">Session token</div>
-        <div className="diagnostics__value">
-          {sessionTokenInfo.present
-            ? `Present (${sessionTokenInfo.masked})`
-            : 'Missing'}
-        </div>
-      </div>
-    </div>
-    <div className="diagnostics__actions">
-      <a className="ghost-button" href={`${apiBase}/__debug/ping`} target="_blank" rel="noreferrer">
-        Open ping
-      </a>
-      <a className="ghost-button" href={`${apiBase}/__debug/version`} target="_blank" rel="noreferrer">
-        Version
-      </a>
-      <a className="ghost-button" href={`${apiBase}/api/debug/echo-auth`} target="_blank" rel="noreferrer">
-        Echo auth
-      </a>
-      {authorizeUrl && (
-        <a className="ghost-button" href={authorizeUrl} target="_blank" rel="noreferrer">
-          Authorize link
-        </a>
-      )}
-    </div>
-  </details>
-);
-
-const Toast = ({ message, onClose }) => (
-  <div className="toast" role="status">
-    <span>{message}</span>
-    <button className="ghost-button" type="button" onClick={onClose}>
-      Dismiss
-    </button>
   </div>
 );
 
@@ -415,13 +49,15 @@ export default function App() {
   });
   const [lastRequest, setLastRequest] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [applyOpen, setApplyOpen] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [toast, setToast] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [showOnlyChanged, setShowOnlyChanged] = useState(true);
   const [compactView, setCompactView] = useState(false);
   const [page, setPage] = useState(1);
   const authPollRef = useRef(null);
+
+  const debugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
 
   useEffect(() => {
     window.__BFR_APP_LOADED = true;
@@ -547,10 +183,6 @@ export default function App() {
     getSessionToken();
   }, [ctxRaw]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [searchInput, showOnlyChanged, compactView, preview]);
-
   const accountId = oauthAccountId;
   const hasAccountId = Boolean(accountId);
   const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
@@ -563,18 +195,18 @@ export default function App() {
     setPreviewLoading(true);
 
     if (!hasApiBase) {
-      setError('We could not reach the preview service. Add VITE_API_BASE_URL and redeploy.');
+      setError('Preview service is unavailable. Add VITE_API_BASE_URL and try again.');
       setPreviewLoading(false);
       return;
     }
     if (!accountId || !boardId) {
-      setError('Waiting for board context. Please reopen the app inside a board.');
+      setError('Open the app inside a board to load preview results.');
       setPreviewLoading(false);
       return;
     }
     const sessionToken = await getSessionToken();
     if (!sessionToken) {
-      setError('No Monday session token. Open the app inside Monday.');
+      setError('Session token missing. Open the app inside Monday.');
       setPreviewLoading(false);
       return;
     }
@@ -618,7 +250,7 @@ export default function App() {
         }
       }
       if (!r.ok) {
-        setError('We could not load preview results. Try again, or open Diagnostics.');
+        setError('We could not load preview results. Try again or open Diagnostics.');
         return;
       }
       let data;
@@ -637,14 +269,17 @@ export default function App() {
         totalMatches: data?.totalMatches || 0,
         totalItems: data?.totalItems || 0
       });
+      setToast(data?.totalMatches ? 'Preview ready.' : 'Preview ready. No matches found.');
     } catch (e) {
-      setError('We could not load preview results. Try again, or open Diagnostics.');
+      setError('We could not load preview results. Try again or open Diagnostics.');
     } finally {
       setPreviewLoading(false);
     }
   }
 
-  const previewDisabled = !boardId || !find || previewLoading || loading || !accountId;
+  const findTrimmed = find.trim();
+  const canPreview = Boolean(boardId) && findTrimmed.length >= 2 && !previewLoading && !loading && hasAccountId;
+  const previewDisabled = !canPreview;
   const showError = Boolean(error) && !(authRequired && error === 'Authorization is required before previewing.');
 
   const debouncedSearch = useDebouncedValue(searchInput);
@@ -659,17 +294,79 @@ export default function App() {
     });
   }, [preview, debouncedSearch, showOnlyChanged]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   const pageRows = filteredRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const currentStep = previewLoading || preview.length > 0 ? 3 : find || replace ? 2 : 1;
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
-  const applyDisabled = previewLoading || preview.length === 0 || summary.totalMatches === 0;
+  useEffect(() => {
+    setPage(1);
+  }, [preview]);
+
+  const currentStep = previewLoading || preview.length > 0 ? 3 : findTrimmed.length >= 2 ? 2 : 1;
+  const applyDisabled = !APPLY_AVAILABLE;
+  const applyTooltip = 'Apply will be enabled once bulk update is available. Preview is safe.';
+
+  const DiagnosticsPanel = () => (
+    <div className="diagnostics surface-2">
+      <div className="diagnostics__grid">
+        <div>
+          <div className="diagnostics__label">Message</div>
+          <div className="diagnostics__value">{error || 'None'}</div>
+        </div>
+        <div>
+          <div className="diagnostics__label">Request id/time</div>
+          <div className="diagnostics__value">
+            {lastRequest ? `${lastRequest.id} · ${lastRequest.time}` : '—'}
+          </div>
+        </div>
+        <div>
+          <div className="diagnostics__label">Endpoint</div>
+          <div className="diagnostics__value">{lastRequest?.endpoint || '—'}</div>
+        </div>
+        <div>
+          <div className="diagnostics__label">Status code</div>
+          <div className="diagnostics__value">{lastRequest?.status || '—'}</div>
+        </div>
+        <div>
+          <div className="diagnostics__label">API base</div>
+          <div className="diagnostics__value">{API_BASE || '—'}</div>
+        </div>
+        <div>
+          <div className="diagnostics__label">Session token</div>
+          <div className="diagnostics__value">
+            {sessionTokenInfo.present
+              ? `Present (${sessionTokenInfo.masked})`
+              : 'Missing'}
+          </div>
+        </div>
+      </div>
+      <div className="diagnostics__actions">
+        <a className="btn btn-secondary" href={`${API_BASE}/__debug/ping`} target="_blank" rel="noreferrer">
+          Open ping
+        </a>
+        <a className="btn btn-secondary" href={`${API_BASE}/__debug/version`} target="_blank" rel="noreferrer">
+          Version
+        </a>
+        <a className="btn btn-secondary" href={`${API_BASE}/api/debug/echo-auth`} target="_blank" rel="noreferrer">
+          Echo auth
+        </a>
+        {authorizeUrl && (
+          <a className="btn btn-secondary" href={authorizeUrl} target="_blank" rel="noreferrer">
+            Authorize link
+          </a>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div className="app-shell">
       <TopBar onHelp={() => setHelpOpen(true)} />
       <main className="content">
-        <Stepper currentStep={currentStep} />
+        <Stepper currentStep={currentStep} connected={Boolean(boardId)} />
 
         {!hasApiBase && (
           <InlineNotice tone="error">Missing VITE_API_BASE_URL. Set the client env var and redeploy.</InlineNotice>
@@ -684,26 +381,20 @@ export default function App() {
         {showError && (
           <InlineNotice tone="error">
             {error}
-            <DiagnosticsPanel
-              error={error}
-              lastRequest={lastRequest}
-              apiBase={API_BASE}
-              sessionTokenInfo={sessionTokenInfo}
-              authorizeUrl={authorizeUrl}
-            />
+            {debugEnabled && <DiagnosticsPanel />}
           </InlineNotice>
         )}
 
         {authRequired && (
-          <div className="card card--padded">
+          <section className="card surface">
             <div className="section-header">
               <h2>Authorize Mustard</h2>
               <span className="pill">Required</span>
             </div>
-            <p>Before running preview, connect your Monday account.</p>
+            <p className="muted">Connect your Monday account to load previews.</p>
             <div className="auth-actions">
               <button
-                className="primary-button"
+                className="btn btn-primary"
                 type="button"
                 onClick={() => {
                   if (!hasAccountId) {
@@ -719,7 +410,7 @@ export default function App() {
                 Authorize
               </button>
               <button
-                className="ghost-button"
+                className="btn btn-secondary"
                 type="button"
                 onClick={() => {
                   if (!authorizeUrl) return;
@@ -730,10 +421,10 @@ export default function App() {
               </button>
             </div>
             <div className="muted">If the popup is blocked, paste the copied link into a new tab.</div>
-          </div>
+          </section>
         )}
 
-        <ScopeSelector boardId={boardId} ctxLoaded={!loading} />
+        <ScopeCard boardId={boardId} ctxLoaded={!loading} />
 
         <FindReplaceForm
           find={find}
@@ -743,6 +434,7 @@ export default function App() {
           onPreview={previewRun}
           previewDisabled={previewDisabled}
           previewLoading={previewLoading}
+          canPreview={canPreview}
         />
 
         <PreviewPanel
@@ -759,44 +451,48 @@ export default function App() {
           setPage={setPage}
           filteredRows={filteredRows}
           pageRows={pageRows}
+          totalPages={totalPages}
+          find={findTrimmed}
         />
 
-        <section className="apply-bar">
+        <section className="apply-bar panel">
           <div>
             <div className="apply-title">Apply changes</div>
-            <div className="muted">Dry run / preview only</div>
+            <div className="muted">Preview only</div>
           </div>
-          <button className="primary-button" type="button" onClick={() => setApplyOpen(true)} disabled={applyDisabled}>
+          <button
+            className="btn btn-ink"
+            type="button"
+            disabled={applyDisabled}
+            title={applyTooltip}
+          >
             Apply changes
           </button>
         </section>
       </main>
 
       {helpOpen && (
-        <Modal title="What this does" onClose={() => setHelpOpen(false)}>
+        <ConfirmModal title="What this does" onClose={() => setHelpOpen(false)}>
           <div className="modal-content">
             <p>
-              Bulk Find &amp; Replace scans all text and long-text columns on the current board, previews the changes, and
-              lets you apply them deliberately.
+              Bulk Find &amp; Replace scans text and long-text columns on the active board, previews matches, and keeps
+              changes safe until bulk update is available.
             </p>
             <ul className="help-list">
               <li>Preview is always safe and doesn&apos;t change data.</li>
-              <li>Review matches in the diff list before applying.</li>
-              <li>Use Diagnostics if preview results fail to load.</li>
+              <li>Review before/after diffs before deciding on next steps.</li>
+              <li>Use Diagnostics only if preview results fail to load.</li>
             </ul>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setShowDiagnostics((prev) => !prev)}
+            >
+              {showDiagnostics ? 'Hide diagnostics' : 'Diagnostics'}
+            </button>
+            {showDiagnostics && <DiagnosticsPanel />}
           </div>
-        </Modal>
-      )}
-
-      {applyOpen && (
-        <ApplyConfirmModal
-          summary={summary}
-          onClose={() => setApplyOpen(false)}
-          onConfirm={() => {
-            setApplyOpen(false);
-            setToast('Preview-only mode: no changes were applied.');
-          }}
-        />
+        </ConfirmModal>
       )}
 
       {toast && <Toast message={toast} onClose={() => setToast('')} />}
