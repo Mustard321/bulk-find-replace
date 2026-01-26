@@ -62,7 +62,8 @@ const run = async () => {
     });
     assert(fakeAuth.json?.debug?.hasDots === true, 'expected hasDots=true for abc.def.ghi');
 
-    const token = jwt.sign({ dat: { user_id: 1, account_id: 2, app_id: 3 } }, 'testsecret', {
+    const signingSecret = process.env.MONDAY_SIGNING_SECRET || 'testsecret';
+    const token = jwt.sign({ dat: { user_id: 1, account_id: 2, app_id: 3 } }, signingSecret, {
       algorithm: 'HS256'
     });
     const whoami = await request('/api/debug/whoami', {

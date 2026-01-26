@@ -160,6 +160,10 @@ const mondayAuth = (req, res, next) => {
     const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
     req.mondayJwt = decoded;
     req.mondayDat = decoded?.dat || decoded?.data?.dat || null;
+    console.log('[mondayAuth] verify ok', {
+      hasDat: Boolean(req.mondayDat),
+      accountId: decoded?.dat?.account_id || decoded?.accountId || null
+    });
     return next();
   } catch (e) {
     if (process.env.NODE_ENV !== 'production') {
