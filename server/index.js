@@ -27,7 +27,9 @@ app.get('/__debug/authorize-config', (_req, res) => {
 });
 
 app.get('/__debug/version', (_req, res) => {
-  res.json({ ok: true, sha: '50cde4b' });
+  const sha = process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || 'unknown';
+  const service = process.env.RENDER_SERVICE_ID || null;
+  res.json({ ok: true, sha, service });
 });
 
 const requiredEnv = ['SERVER_BASE_URL', 'ALLOWED_ORIGINS', 'MONDAY_CLIENT_ID', 'MONDAY_CLIENT_SECRET'];
