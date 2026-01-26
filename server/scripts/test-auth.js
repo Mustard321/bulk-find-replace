@@ -44,7 +44,7 @@ const run = async () => {
       SERVER_BASE_URL: baseUrl,
       ALLOWED_ORIGINS: 'http://localhost:3000',
       MONDAY_CLIENT_ID: 'dummy',
-      MONDAY_CLIENT_SECRET: 'dummy',
+      MONDAY_CLIENT_SECRET: 'clientsecret',
       MONDAY_SIGNING_SECRET: 'testsecret'
     },
     stdio: 'ignore'
@@ -63,6 +63,7 @@ const run = async () => {
     assert(fakeAuth.json?.debug?.hasDots === true, 'expected hasDots=true for abc.def.ghi');
 
     const signingSecret = process.env.MONDAY_SIGNING_SECRET || 'testsecret';
+    const clientSecret = process.env.MONDAY_CLIENT_SECRET || 'clientsecret';
     const token = jwt.sign({ dat: { user_id: 1, account_id: 2, app_id: 3 } }, signingSecret, {
       algorithm: 'HS256'
     });
@@ -74,6 +75,14 @@ const run = async () => {
     assert(whoami.json?.accountId === 2, 'accountId should be 2');
     assert(whoami.json?.userId === 1, 'userId should be 1');
     assert(whoami.json?.appId === 3, 'appId should be 3');
+
+    const clientToken = jwt.sign({ dat: { user_id: 1, account_id: 2, app_id: 3 } }, clientSecret, {
+      algorithm: 'HS256'
+    });
+    const clientRes = await request('/api/debug/verify', {
+      headers: { Authorization: `Bearer ${clientToken}` }
+    });
+    assert(clientRes.status === 200, 'verify should accept client secret token');
 
     const badToken = jwt.sign({ dat: { user_id: 1 } }, 'wrongsecret', { algorithm: 'HS256' });
     const badRes = await request('/api/debug/verify', {

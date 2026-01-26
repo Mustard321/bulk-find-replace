@@ -140,50 +140,54 @@ const buildAuthDebug = ({ authHeader, token, startsWithBearer }) => {
   };
 };
 
+const verifyMondayJwt = (token) => {
+  const client = (process.env.MONDAY_CLIENT_SECRET || '').trim();
+  const signing = (process.env.MONDAY_SIGNING_SECRET || '').trim();
+  try {
+    const decoded = jwt.verify(token, client, { algorithms: ['HS256'] });
+    return { decoded, verifiedWith: 'CLIENT' };
+  } catch {
+    const decoded = jwt.verify(token, signing, { algorithms: ['HS256'] });
+    return { decoded, verifiedWith: 'SIGNING' };
+  }
+};
+
 const mondayAuth = (req, res, next) => {
   const authHeader = req.headers.authorization || '';
   const startsWithBearer = authHeader.startsWith('Bearer ');
   const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
   const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
-  const signing = (process.env.MONDAY_SIGNING_SECRET || '').trim();
-  const secretLen = signing.length;
-  const secretFp = secretFingerprint(signing);
 
   if (!token) {
     if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] missing token', { secretLen, secretFp, ...debug });
+      console.warn('[mondayAuth] missing token', { ...debug });
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_TOKEN', debug });
   }
   if (!debug.hasDots) {
     if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] token not jwt', { secretLen, secretFp, ...debug });
+      console.warn('[mondayAuth] token not jwt', { ...debug });
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'TOKEN_NOT_JWT', debug });
   }
-  if (!signing) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET', { secretLen, secretFp });
-    }
-    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET', debug });
-  }
 
   try {
-    const decoded = jwt.verify(token.trim(), signing, { algorithms: ['HS256'] });
+    const { decoded, verifiedWith } = verifyMondayJwt(token);
     req.mondayJwt = decoded;
+    req.mondayVerifiedWith = verifiedWith;
     req.mondayDat = decoded?.dat || decoded?.data?.dat || null;
     console.log('[mondayAuth] verify ok', {
       hasDat: Boolean(req.mondayDat),
-      accountId: decoded?.dat?.account_id || decoded?.accountId || null
+      accountId: decoded?.dat?.account_id || decoded?.accountId || null,
+      verifiedWith
     });
     return next();
   } catch (e) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn(
-        `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen} secretFp=${secretFp}`,
-        debug
-      );
-    }
+    const clientLen = (process.env.MONDAY_CLIENT_SECRET || '').trim().length;
+    const signingLen = (process.env.MONDAY_SIGNING_SECRET || '').trim().length;
+    console.warn(
+      `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} tokenLength=${debug.tokenLength} hasDots=${debug.hasDots} startsWithBearer=${debug.startsWithBearer} clientLen=${clientLen} signingLen=${signingLen}`
+    );
     return res.status(401).json({
       ok: false,
       error: 'UNAUTHORIZED',
@@ -235,42 +239,25 @@ app.get('/api/debug/which-secret', (req, res) => {
     return res.json({
       ok: false,
       verifiedWith: null,
-      signingWorked: false,
-      clientWorked: false,
       tokenLooksJwt
     });
   }
-  const signing = (process.env.MONDAY_SIGNING_SECRET || '').trim();
-  const client = (process.env.MONDAY_CLIENT_SECRET || '').trim();
-  let signingWorked = false;
-  let clientWorked = false;
   try {
-    jwt.verify(token, signing, { algorithms: ['HS256'] });
-    signingWorked = true;
+    const { decoded, verifiedWith } = verifyMondayJwt(token);
+    return res.json({
+      ok: true,
+      verifiedWith,
+      iat: decoded?.iat || null,
+      exp: decoded?.exp || null,
+      hasDat: Boolean(decoded?.dat || decoded?.data?.dat)
+    });
   } catch {
-    signingWorked = false;
+    return res.json({
+      ok: false,
+      verifiedWith: null,
+      tokenLooksJwt
+    });
   }
-  if (!signingWorked) {
-    try {
-      jwt.verify(token, client, { algorithms: ['HS256'] });
-      clientWorked = true;
-    } catch {
-      clientWorked = false;
-    }
-  }
-  if (signingWorked) {
-    return res.json({ ok: true, verifiedWith: 'SIGNING' });
-  }
-  if (clientWorked) {
-    return res.json({ ok: true, verifiedWith: 'CLIENT' });
-  }
-  return res.json({
-    ok: false,
-    verifiedWith: null,
-    signingWorked,
-    clientWorked,
-    tokenLooksJwt
-  });
 });
 
 app.get('/api/auth-check', mondayAuth, (req, res) => {
