@@ -8,6 +8,7 @@ export default function App() {
   const hasApiBase = Boolean(API_BASE);
   const [ctx,setCtx]=useState(null);
   const [ctxRaw,setCtxRaw]=useState(null);
+  const [ctxErr,setCtxErr]=useState(null);
   const [find,setFind]=useState('');
   const [replace,setReplace]=useState('');
   const [preview,setPreview]=useState([]);
@@ -20,6 +21,13 @@ export default function App() {
   const [oauthAccountId,setOauthAccountId]=useState('');
   const authPollRef = React.useRef(null);
 
+  useEffect(() => {
+    window.__BFR_APP_LOADED = true;
+    window.__BFR_LOCATION = String(window.location.href);
+    window.__BFR_IN_IFRAME = window.self !== window.top;
+    window.__BFR_MONDAY = monday;
+  }, [monday]);
+
   useEffect(()=>{
     let mounted = true;
     const normalizeContext = data => data?.data ?? data;
@@ -31,7 +39,6 @@ export default function App() {
       data?.data?.user?.account_id ||
       data?.data?.user?.accountId ||
       null;
-    window.__BFR_MONDAY = monday;
     const unsubscribe = monday.listen('context',c=>{
       if (!mounted) return;
       setCtxRaw(c);
@@ -46,6 +53,7 @@ export default function App() {
       if (!mounted) return;
       console.log('[BFR] context', res);
       window.__BFR_CTX = res;
+      window.__BFR_CTX_DATA = res?.data || null;
       setCtxRaw(res);
       const next = normalizeContext(res);
       if (next) setCtx(next);
@@ -53,7 +61,10 @@ export default function App() {
       const nextAccountId = extractAccountId(res);
       if (nextAccountId) setOauthAccountId(String(nextAccountId));
       setLoading(false);
-    }).catch(()=>{
+    }).catch((e)=>{
+      const message = String(e?.message || e);
+      setCtxErr(message);
+      window.__BFR_CTX_ERR = message;
       if (mounted) setLoading(false);
     });
     return ()=>{ mounted = false; unsubscribe?.(); };
@@ -167,14 +178,29 @@ export default function App() {
   const authorizeUrl = hasApiBase && hasAccountId
     ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}`
     : '';
+  const ctxAccountId =
+    ctx?.account?.id ||
+    ctx?.user?.account?.id ||
+    ctx?.user?.account_id ||
+    null;
 
   const showError = error && !(authRequired && error === 'Not authorized yet — click Authorize.');
 
   return (
     <div style={{padding:20}}>
       <div style={{border:'1px solid #ccc',padding:8,marginBottom:12,fontSize:12}}>
+        <div>
+          appLoaded={String(Boolean(window.__BFR_APP_LOADED))}{' '}
+          inIframe={String(window.self !== window.top)}{' '}
+          ctxLoaded={String(Boolean(ctxRaw))}{' '}
+          accountId={String(accountId || '')}{' '}
+          ctxErr={String(ctxErr || '')}
+        </div>
         <div>apiBaseUrl: {API_BASE || '(missing)'}</div>
         <div>accountId: {accountId || '(missing)'}</div>
+        <div>ctxLoaded: {String(Boolean(ctxRaw))}</div>
+        <div>ctxAccountId: {ctxAccountId || '(missing)'}</div>
+        <div>ctxErr: {ctxErr || ''}</div>
         <div>ctx keys: {Object.keys(ctxRaw?.data || {}).join(', ') || '(none)'}</div>
         {!accountId && <div style={{color:'crimson'}}>ACCOUNT ID MISSING — cannot authorize</div>}
       </div>
