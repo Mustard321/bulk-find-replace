@@ -126,13 +126,31 @@ app.get('/auth/callback', async (req, res) => {
       code: authCode,
       redirect_uri: redirectUri
     });
-    const tokenAccountId = String(r.data.account_id || '');
-    if (!/^\d+$/.test(tokenAccountId)) {
-      console.log('OAuth exchange success account_id=missing stored=false');
-      return res.status(500).send('Missing account id');
+    let tokenAccountId = r.data?.account_id;
+    const accessToken = r.data?.access_token;
+    if (!tokenAccountId && accessToken) {
+      const meRes = await axios.post('https://api.monday.com/v2', {
+        query: 'query { me { account { id } } }'
+      }, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      const hasErrors = Boolean(meRes.data?.errors?.length);
+      const hasId = Boolean(meRes.data?.data?.me?.account?.id);
+      if (hasErrors || !hasId) {
+        console.log(`[OAUTH] me lookup failed status=${meRes.status} hasErrors=${hasErrors} hasId=${hasId}`);
+        return res.status(500).json({ ok: false, error: 'ACCOUNT_ID_LOOKUP_FAILED' });
+      }
+      tokenAccountId = meRes.data?.data?.me?.account?.id;
     }
-    saveToken(tokenAccountId, r.data.access_token);
-    console.log(`[OAUTH] token ok account_id=${tokenAccountId}`);
+    if (!tokenAccountId) {
+      console.log('[OAUTH] token missing account_id stored=false');
+      return res.status(500).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+    }
+    saveToken(String(tokenAccountId), accessToken);
+    console.log(`[OAUTH] token ok account_id=${tokenAccountId} stored=true`);
     if (stateValue && String(stateValue).length > 0) {
       stateTokenMap.set(String(stateValue), r.data.access_token);
     }
@@ -173,6 +191,9 @@ app.post('/api/graphql', rateLimit, async (req, res) => {
 
 app.get('/api/auth/status', (req, res) => {
   const accountId = req.query?.accountId || req.body?.accountId;
+  if (!accountId) {
+    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+  }
   if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
     return res.status(400).send('Invalid accountId');
   }
@@ -201,6 +222,9 @@ const countOccurrences = (text, find) => {
 
 app.post('/api/preview', rateLimit, async (req, res) => {
   const { accountId, boardId, find, replace } = req.body || {};
+  if (!accountId) {
+    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+  }
   if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
     return res.status(400).send('Invalid accountId');
   }
