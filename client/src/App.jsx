@@ -455,13 +455,16 @@ export default function App() {
           find={findTrimmed}
         />
 
-        <section className="apply-bar panel">
-          <div>
-            <div className="apply-title">Apply changes</div>
-            <div className="muted">Preview only</div>
+        <section className="apply-bar surface">
+          <div className="apply-meta">
+            <div className="apply-row">
+              <div className="apply-title">Apply changes</div>
+              <span className="pill pill-gold">Preview only</span>
+            </div>
+            <div className="muted apply-helper">Bulk apply will be enabled once updates are available.</div>
           </div>
           <button
-            className="btn btn-ink"
+            className="btn btn-secondary"
             type="button"
             disabled={applyDisabled}
             title={applyTooltip}

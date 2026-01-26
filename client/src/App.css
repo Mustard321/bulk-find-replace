@@ -4,14 +4,17 @@
 
 body {
   margin: 0;
-  font-family: "Optima", "Avenir", "Helvetica Neue", sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, "SF Pro Display", "SF Pro Text", Inter, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  font-weight: 480;
+  line-height: 1.5;
 }
 
 h2,
 h3 {
   margin: 0;
-  font-family: "Iowan Old Style", "Palatino", "Times New Roman", serif;
-  font-weight: 600;
+  font-weight: 850;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
 }
 
 p {
@@ -38,7 +41,7 @@ button {
   max-width: 1100px;
   width: 100%;
   margin: 0 auto;
-  padding: 28px 20px 120px;
+  padding: 28px 20px 140px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -68,9 +71,10 @@ button {
 
 .wordmark {
   font-size: 1.5rem;
-  font-family: "Iowan Old Style", "Palatino", "Times New Roman", serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, "SF Pro Display", "SF Pro Text", Inter, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
   letter-spacing: 0.06em;
   text-transform: lowercase;
+  font-weight: 800;
 }
 
 .stepper {
@@ -302,15 +306,34 @@ button {
 .apply-bar {
   position: sticky;
   bottom: 0;
-  padding: 16px 20px;
+  padding: 14px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
 }
 
 .apply-title {
   font-weight: 600;
+}
+
+.apply-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.apply-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.apply-helper {
+  font-size: 0.85rem;
 }
 
 .skeleton-stack {
