@@ -134,7 +134,7 @@ const mondayAuth = (req, res, next) => {
   const startsWithBearer = authHeader.startsWith('Bearer ');
   const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
   const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
-  const secret = (process.env.MONDAY_CLIENT_SECRET || '').trim();
+  const secret = (process.env.MONDAY_SIGNING_SECRET || '').trim();
   const secretLen = secret.length;
 
   if (!token) {
@@ -151,7 +151,7 @@ const mondayAuth = (req, res, next) => {
   }
   if (!secret) {
     if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] missing MONDAY_CLIENT_SECRET', { secretLen });
+      console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET', { secretLen });
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET', debug });
   }
@@ -183,13 +183,13 @@ app.get('/api/auth-check', mondayAuth, (req, res) => {
 
 app.get('/api/debug/verify', mondayAuth, (req, res) => {
   const dat = req.mondayDat || null;
+  const jwtData = req.mondayJwt || {};
   res.json({
     ok: true,
     dat,
-    decodedKeys: Object.keys(req.mondayJwt || {}),
-    user_id: dat?.user_id,
-    account_id: dat?.account_id,
-    app_id: dat?.app_id
+    user_id: dat?.user_id || jwtData?.user_id,
+    account_id: dat?.account_id || jwtData?.account_id,
+    app_id: dat?.app_id || jwtData?.app_id
   });
 });
 
@@ -206,11 +206,9 @@ app.get('/api/debug/whoami', mondayAuth, (req, res) => {
   const jwt = req.mondayJwt || {};
   res.json({
     ok: true,
-    dat,
-    jwtKeys: Object.keys(req.mondayJwt || {}),
-    appId: dat?.app_id || jwt?.app_id,
     accountId: dat?.account_id || jwt?.account_id,
-    userId: dat?.user_id || jwt?.user_id
+    userId: dat?.user_id || jwt?.user_id,
+    appId: dat?.app_id || jwt?.app_id
   });
 });
 
@@ -240,10 +238,6 @@ app.get('/auth/callback', async (req, res) => {
   const stateValue = Array.isArray(state) ? state[0] : state;
   const stateString = stateValue ? String(stateValue) : '';
   const stateAccountId = stateString.split('.')[0];
-  if (!stateAccountId) {
-    console.log('[OAUTH] callback missing accountId');
-    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
-  }
   if (error) return res.status(400).send(String(error_description || error));
   if (!authCode) return res.status(400).send('Missing code');
   try {
@@ -254,8 +248,26 @@ app.get('/auth/callback', async (req, res) => {
       redirect_uri: redirectUri
     });
     const accessToken = r.data?.access_token;
-    saveToken(String(stateAccountId), accessToken);
-    console.log(`[OAUTH] token ok account_id=${stateAccountId} stored=true source=state`);
+    if (!accessToken) {
+      return res.status(500).json({ ok: false, error: 'MISSING_ACCESS_TOKEN' });
+    }
+    let tokenAccountId = r.data?.account_id;
+    let source = 'token_response';
+    if (!tokenAccountId && stateAccountId) {
+      tokenAccountId = stateAccountId;
+      source = 'state';
+    }
+    const queryAccountId = Array.isArray(req.query.accountId) ? req.query.accountId[0] : req.query.accountId;
+    if (!tokenAccountId && queryAccountId) {
+      tokenAccountId = queryAccountId;
+      source = 'query';
+    }
+    if (!tokenAccountId) {
+      console.log('[OAUTH] callback missing accountId');
+      return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+    }
+    saveToken(String(tokenAccountId), accessToken);
+    console.log(`[OAUTH] token ok account_id=${tokenAccountId} stored=true source=${source}`);
     res.send(`<!doctype html>
 <html>
   <body>Authorized. You can close this tab.

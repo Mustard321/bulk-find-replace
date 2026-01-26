@@ -3,10 +3,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import mondaySdk from 'monday-sdk-js';
 
 export default function App() {
-  const monday = useMemo(() => (window.mondaySdk ? window.mondaySdk() : mondaySdk()), []);
-  const rawApiBase = import.meta.env.VITE_API_BASE_URL || '';
-  const API_BASE = rawApiBase || 'https://bulk-find-replace-server.onrender.com';
-  const hasApiBase = Boolean(rawApiBase);
+  const monday = useMemo(() => {
+    if (window.__BFR_MONDAY) return window.__BFR_MONDAY;
+    const sdk = window.mondaySdk ? window.mondaySdk() : mondaySdk();
+    window.__BFR_MONDAY = sdk;
+    return sdk;
+  }, []);
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+  const hasApiBase = Boolean(API_BASE);
   const [ctx,setCtx]=useState(null);
   const [ctxRaw,setCtxRaw]=useState(null);
   const [ctxErr,setCtxErr]=useState(null);
@@ -31,7 +35,7 @@ export default function App() {
     window.__BFR_APP_LOADED = true;
     window.__BFR_LOCATION = String(window.location.href);
     window.__BFR_IN_IFRAME = window.self !== window.top;
-    window.__BFR_MONDAY = monday;
+    window.__BFR_MONDAY = window.__BFR_MONDAY || monday;
   }, [monday]);
 
   useEffect(()=>{
@@ -156,6 +160,11 @@ export default function App() {
     setPreview([]);
     setSummary({ totalMatches: 0, totalItems: 0 });
     setPreviewLoading(true);
+    if (!hasApiBase) {
+      setError('Missing VITE_API_BASE_URL.');
+      setPreviewLoading(false);
+      return;
+    }
     if (!accountId || !boardId) {
       setError('Missing board context (boardId).');
       setPreviewLoading(false);
@@ -232,7 +241,7 @@ export default function App() {
   const accountId = oauthAccountId;
   const previewDisabled = !boardId || !find || previewLoading || loading || !accountId;
   const hasAccountId = Boolean(accountId);
-  const authorizeUrl = hasAccountId
+  const authorizeUrl = hasApiBase && hasAccountId
     ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}`
     : '';
   const ctxAccountId =
@@ -259,6 +268,23 @@ export default function App() {
           sessionToken present: {String(sessionTokenInfo.present)}{' '}
           jwt: {String(sessionTokenInfo.looksJwt)}{' '}
           token: {sessionTokenInfo.masked || '(missing)'}
+          <button
+            onClick={async () => {
+              const token = await getSessionToken();
+              if (!token) {
+                setError('No Monday session token. Open the app inside Monday.');
+                return;
+              }
+              try {
+                await navigator.clipboard.writeText(token);
+              } catch {
+                setError('Failed to copy session token.');
+              }
+            }}
+            style={{ marginLeft: 8 }}
+          >
+            Copy sessionToken
+          </button>
         </div>
         <div>ctxLoaded: {String(Boolean(ctxRaw))}</div>
         <div>ctxAccountId: {ctxAccountId || '(missing)'}</div>
