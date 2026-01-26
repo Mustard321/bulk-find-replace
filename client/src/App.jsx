@@ -49,7 +49,7 @@ const Stepper = ({ currentStep }) => (
 );
 
 const InlineNotice = ({ tone = 'neutral', children }) => (
-  <div className={`notice notice--${tone}`} role={tone === 'error' ? 'alert' : 'status`}>
+  <div className={"notice notice--" + tone} role={tone === 'error' ? 'alert' : 'status'}>
     {children}
   </div>
 );
