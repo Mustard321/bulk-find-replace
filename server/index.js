@@ -22,6 +22,10 @@ app.get('/__debug/ping', (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
+app.get('/__debug/authorize-config', (_req, res) => {
+  res.json({ ok: true, requiresAccountId: true, stateFormat: '<accountId>.<nonce>' });
+});
+
 const requiredEnv = ['SERVER_BASE_URL', 'ALLOWED_ORIGINS', 'MONDAY_CLIENT_ID', 'MONDAY_CLIENT_SECRET'];
 const missingEnv = requiredEnv.filter(k => !process.env[k]);
 if (missingEnv.length) {
@@ -82,7 +86,6 @@ const saveToken = (id, token) =>
 const getToken = id =>
   db.prepare('SELECT token FROM tokens WHERE account_id = ?').get(id)?.token;
 
-const stateTokenMap = new Map();
 
 const rateWindowMs = 60_000;
 const rateMax = 120;
@@ -103,12 +106,17 @@ app.get('/health', (_, res) => {
 });
 
 app.get('/auth/authorize', (req, res) => {
-  console.log('[OAUTH] authorize start');
+  const accountId = req.query?.accountId;
+  if (!accountId) {
+    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+  }
   const url = new URL('https://auth.monday.com/oauth2/authorize');
   url.searchParams.set('client_id', process.env.MONDAY_CLIENT_ID);
   url.searchParams.set('redirect_uri', redirectUri);
-  const state = crypto.randomBytes(16).toString('hex');
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const state = `${String(accountId)}.${nonce}`;
   url.searchParams.set('state', state);
+  console.log(`[OAUTH] authorize start accountId=${accountId} state=${state}`);
   res.redirect(url.toString());
 });
 
@@ -117,6 +125,12 @@ app.get('/auth/callback', async (req, res) => {
   const { code, error, error_description, state } = req.query;
   const authCode = Array.isArray(code) ? code[0] : code;
   const stateValue = Array.isArray(state) ? state[0] : state;
+  const stateString = stateValue ? String(stateValue) : '';
+  const stateAccountId = stateString.split('.')[0];
+  if (!stateAccountId) {
+    console.log('[OAUTH] callback missing accountId');
+    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+  }
   if (error) return res.status(400).send(String(error_description || error));
   if (!authCode) return res.status(400).send('Missing code');
   try {
@@ -126,34 +140,9 @@ app.get('/auth/callback', async (req, res) => {
       code: authCode,
       redirect_uri: redirectUri
     });
-    let tokenAccountId = r.data?.account_id;
     const accessToken = r.data?.access_token;
-    if (!tokenAccountId && accessToken) {
-      const meRes = await axios.post('https://api.monday.com/v2', {
-        query: 'query { me { account { id } } }'
-      }, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      const hasErrors = Boolean(meRes.data?.errors?.length);
-      const hasId = Boolean(meRes.data?.data?.me?.account?.id);
-      if (hasErrors || !hasId) {
-        console.log(`[OAUTH] me lookup failed status=${meRes.status} hasErrors=${hasErrors} hasId=${hasId}`);
-        return res.status(500).json({ ok: false, error: 'ACCOUNT_ID_LOOKUP_FAILED' });
-      }
-      tokenAccountId = meRes.data?.data?.me?.account?.id;
-    }
-    if (!tokenAccountId) {
-      console.log('[OAUTH] token missing account_id stored=false');
-      return res.status(500).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
-    }
-    saveToken(String(tokenAccountId), accessToken);
-    console.log(`[OAUTH] token ok account_id=${tokenAccountId} stored=true`);
-    if (stateValue && String(stateValue).length > 0) {
-      stateTokenMap.set(String(stateValue), r.data.access_token);
-    }
+    saveToken(String(stateAccountId), accessToken);
+    console.log(`[OAUTH] token ok account_id=${stateAccountId} stored=true source=state`);
     res.send(`<!doctype html>
 <html>
   <body>Authorized. You can close this tab.
