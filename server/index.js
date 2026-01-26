@@ -193,22 +193,6 @@ const mondayAuth = (req, res, next) => {
   }
 };
 
-app.get('/api/auth-check', mondayAuth, (req, res) => {
-  res.json({ ok: true, monday: req.mondayJwt });
-});
-
-app.get('/api/debug/verify', mondayAuth, (req, res) => {
-  const dat = req.mondayDat || null;
-  const jwtData = req.mondayJwt || {};
-  res.json({
-    ok: true,
-    dat,
-    user_id: dat?.user_id || jwtData?.user_id,
-    account_id: dat?.account_id || jwtData?.account_id,
-    app_id: dat?.app_id || jwtData?.app_id
-  });
-});
-
 app.get('/api/debug/echo-auth', (req, res) => {
   const authHeader = req.headers.authorization || '';
   const startsWithBearer = authHeader.startsWith('Bearer ');
@@ -225,6 +209,22 @@ app.get('/api/debug/env-fp', (_req, res) => {
     clientPresent: Boolean(clientSecret),
     clientLen: clientSecretLen,
     clientFp: clientSecretFp
+  });
+});
+
+app.get('/api/auth-check', mondayAuth, (req, res) => {
+  res.json({ ok: true, monday: req.mondayJwt });
+});
+
+app.get('/api/debug/verify', mondayAuth, (req, res) => {
+  const dat = req.mondayDat || null;
+  const jwtData = req.mondayJwt || {};
+  res.json({
+    ok: true,
+    dat,
+    user_id: dat?.user_id || jwtData?.user_id,
+    account_id: dat?.account_id || jwtData?.account_id,
+    app_id: dat?.app_id || jwtData?.app_id
   });
 });
 
