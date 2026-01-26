@@ -13,13 +13,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
 
+const secretFingerprint = (value) => {
+  if (!value) return null;
+  return crypto.createHash('sha256').update(value).digest('hex').slice(0, 8);
+};
+
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.path}`);
   next();
 });
 
-console.log('[env] MONDAY_CLIENT_SECRET present:', Boolean(process.env.MONDAY_CLIENT_SECRET));
-console.log('[env] MONDAY_SIGNING_SECRET present:', Boolean(process.env.MONDAY_SIGNING_SECRET));
+const signingSecret = (process.env.MONDAY_SIGNING_SECRET || '').trim();
+const clientSecret = (process.env.MONDAY_CLIENT_SECRET || '').trim();
+const signingSecretLen = signingSecret.length;
+const clientSecretLen = clientSecret.length;
+const signingSecretFp = secretFingerprint(signingSecret);
+const clientSecretFp = secretFingerprint(clientSecret);
+console.log('[env] MONDAY_SIGNING_SECRET present:', Boolean(signingSecret), 'len:', signingSecretLen, 'fp:', signingSecretFp);
+console.log('[env] MONDAY_CLIENT_SECRET present:', Boolean(clientSecret), 'len:', clientSecretLen, 'fp:', clientSecretFp);
 console.log('[env] ALLOWED_ORIGINS:', process.env.ALLOWED_ORIGINS);
 
 app.get('/__debug/ping', (_req, res) => {
@@ -136,22 +147,23 @@ const mondayAuth = (req, res, next) => {
   const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
   const secret = (process.env.MONDAY_SIGNING_SECRET || '').trim();
   const secretLen = secret.length;
+  const secretFp = secretFingerprint(secret);
 
   if (!token) {
     if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] missing token', { secretLen, ...debug });
+      console.warn('[mondayAuth] missing token', { secretLen, secretFp, ...debug });
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_TOKEN', debug });
   }
   if (!debug.hasDots) {
     if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] token not jwt', { secretLen, ...debug });
+      console.warn('[mondayAuth] token not jwt', { secretLen, secretFp, ...debug });
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'TOKEN_NOT_JWT', debug });
   }
   if (!secret) {
     if (process.env.NODE_ENV !== 'production') {
-      console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET', { secretLen });
+      console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET', { secretLen, secretFp });
     }
     return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET', debug });
   }
@@ -168,7 +180,7 @@ const mondayAuth = (req, res, next) => {
   } catch (e) {
     if (process.env.NODE_ENV !== 'production') {
       console.warn(
-        `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen}`,
+        `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen} secretFp=${secretFp}`,
         debug
       );
     }
@@ -203,6 +215,17 @@ app.get('/api/debug/echo-auth', (req, res) => {
   const token = startsWithBearer ? authHeader.slice(7) : authHeader;
   const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
   res.json({ ok: true, debug });
+});
+
+app.get('/api/debug/env-fp', (_req, res) => {
+  res.json({
+    signingPresent: Boolean(signingSecret),
+    signingLen: signingSecretLen,
+    signingFp: signingSecretFp,
+    clientPresent: Boolean(clientSecret),
+    clientLen: clientSecretLen,
+    clientFp: clientSecretFp
+  });
 });
 
 app.get('/api/debug/whoami', mondayAuth, (req, res) => {
