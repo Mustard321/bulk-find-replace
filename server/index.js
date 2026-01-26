@@ -18,6 +18,10 @@ app.use((req, _res, next) => {
   next();
 });
 
+console.log('[env] MONDAY_CLIENT_SECRET present:', Boolean(process.env.MONDAY_CLIENT_SECRET));
+console.log('[env] MONDAY_SIGNING_SECRET present:', Boolean(process.env.MONDAY_SIGNING_SECRET));
+console.log('[env] ALLOWED_ORIGINS:', process.env.ALLOWED_ORIGINS);
+
 app.get('/__debug/ping', (_req, res) => {
   console.log('[DBG] ping');
   res.json({ ok: true, ts: Date.now() });
@@ -114,7 +118,7 @@ const mondayAuth = (req, res, next) => {
   try {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const secret = (process.env.MONDAY_SIGNING_SECRET || '').trim();
+    const secret = (process.env.MONDAY_CLIENT_SECRET || '').trim();
     const secretLen = secret ? String(secret).length : 0;
 
     if (!token) {
@@ -125,40 +129,48 @@ const mondayAuth = (req, res, next) => {
     }
     if (!secret) {
       if (process.env.NODE_ENV !== 'production') {
-        console.warn('[mondayAuth] missing MONDAY_SIGNING_SECRET', { secretLen });
+        console.warn('[mondayAuth] missing MONDAY_CLIENT_SECRET', { secretLen });
       }
       return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_SECRET' });
     }
 
-    const decoded = jwt.verify(token, secret);
-    req.monday = decoded;
+    const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
+    req.mondayJwt = decoded;
+    req.mondayDat = decoded?.dat || decoded?.data?.dat || null;
     return next();
   } catch (e) {
-    const secretLen = (process.env.MONDAY_SIGNING_SECRET || '').trim().length;
+    const secretLen = (process.env.MONDAY_CLIENT_SECRET || '').trim().length;
     console.warn(`[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} secretLen=${secretLen}`);
     return res.status(401).json({
       ok: false,
       error: 'UNAUTHORIZED',
-      reason: 'VERIFY_FAILED',
-      detail: e?.message || ''
+      reason: e?.name || 'VERIFY_FAILED'
     });
   }
 };
 
 app.get('/api/auth-check', mondayAuth, (req, res) => {
-  res.json({ ok: true, monday: req.monday });
+  res.json({ ok: true, monday: req.mondayJwt });
 });
 
 app.get('/api/debug/verify', mondayAuth, (req, res) => {
-  res.json({ ok: true, monday: req.monday });
+  const dat = req.mondayDat || null;
+  res.json({
+    ok: true,
+    dat,
+    user_id: dat?.user_id,
+    account_id: dat?.account_id,
+    app_id: dat?.app_id
+  });
 });
 
 app.get('/api/debug/whoami', mondayAuth, (req, res) => {
+  const dat = req.mondayDat || null;
   res.json({
     ok: true,
-    appId: req.monday?.dat?.app_id,
-    accountId: req.monday?.dat?.account_id,
-    userId: req.monday?.dat?.user_id
+    appId: dat?.app_id,
+    accountId: dat?.account_id,
+    userId: dat?.user_id
   });
 });
 

@@ -123,12 +123,15 @@ export default function App() {
     setAuthRequired(false);
     setPreview([]);
     setSummary({ totalMatches: 0, totalItems: 0 });
+    setPreviewLoading(true);
     if (!hasApiBase) {
       setError('Missing VITE_API_BASE_URL.');
+      setPreviewLoading(false);
       return;
     }
     if (!accountId || !boardId) {
       setError('Missing board context (boardId).');
+      setPreviewLoading(false);
       return;
     }
     let sessionToken = '';
@@ -137,31 +140,33 @@ export default function App() {
       sessionToken = tokenRes?.data || '';
     } catch {
       setError('Missing Monday session token.');
+      setPreviewLoading(false);
       return;
     }
     if (!sessionToken) {
       setError('Missing Monday session token.');
+      setPreviewLoading(false);
       return;
     }
-    setPreviewLoading(true);
-    const r = await fetch(`${API_BASE}/api/preview`,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        Authorization:`Bearer ${sessionToken}`
-      },
-      body:JSON.stringify({
-        accountId,
-        boardId,
-        find,
-        replace
-      })
-    });
     try {
+      const r = await fetch(`${API_BASE}/api/preview`,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          Authorization:`Bearer ${sessionToken}`
+        },
+        body:JSON.stringify({
+          accountId,
+          boardId,
+          find,
+          replace
+        })
+      });
+      const raw = await r.text();
       if (r.status === 401) {
         let payload;
         try {
-          payload = await r.json();
+          payload = raw ? JSON.parse(raw) : null;
         } catch {
           payload = null;
         }
@@ -172,16 +177,22 @@ export default function App() {
         }
       }
       if (!r.ok) {
-        const msg = await r.text();
-        setError(msg || 'Failed to load preview.');
+        setError(`Preview failed (${r.status}): ${raw || 'No body'}`);
         return;
       }
-      const d = await r.json();
-      setPreview(d?.rows || []);
+      let data;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        data = raw;
+      }
+      setPreview(data?.rows || []);
       setSummary({
-        totalMatches: d?.totalMatches || 0,
-        totalItems: d?.totalItems || 0
+        totalMatches: data?.totalMatches || 0,
+        totalItems: data?.totalItems || 0
       });
+    } catch (e) {
+      setError(String(e?.message || e));
     } finally {
       setPreviewLoading(false);
     }
