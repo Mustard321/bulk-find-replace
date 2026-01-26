@@ -105,12 +105,31 @@ app.use(express.json({ limit: '1mb' }));
 const dbPath = process.env.TOKENS_DB_PATH || './tokens.db';
 const db = new Database(dbPath);
 db.prepare('CREATE TABLE IF NOT EXISTS tokens (account_id TEXT PRIMARY KEY, token TEXT)').run();
+db.prepare(`CREATE TABLE IF NOT EXISTS audit_log (
+  run_id TEXT,
+  account_id TEXT,
+  board_id TEXT,
+  target_type TEXT,
+  object_id TEXT,
+  column_or_block_id TEXT,
+  before TEXT,
+  after TEXT,
+  status TEXT,
+  error TEXT,
+  created_at INTEGER
+)`).run();
 
 const saveToken = (id, token) =>
   db.prepare('INSERT OR REPLACE INTO tokens VALUES (?, ?)').run(id, token);
 
 const getToken = id =>
   db.prepare('SELECT token FROM tokens WHERE account_id = ?').get(id)?.token;
+
+const insertAudit = db.prepare(
+  `INSERT INTO audit_log
+   (run_id, account_id, board_id, target_type, object_id, column_or_block_id, before, after, status, error, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+);
 
 
 const rateWindowMs = 60_000;
@@ -396,6 +415,8 @@ const truncateSnippet = (text, max = 120) => {
   return `${text.slice(0, max - 1)}…`;
 };
 
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const countOccurrences = (text, find) => {
   if (!text || !find) return 0;
   let count = 0;
@@ -407,6 +428,261 @@ const countOccurrences = (text, find) => {
     idx = next + find.length;
   }
   return count;
+};
+
+const buildMatcher = (findText, replaceText, rules = {}) => {
+  const caseSensitive = Boolean(rules.caseSensitive);
+  const wholeWord = Boolean(rules.wholeWord);
+  const safeFind = String(findText || '');
+
+  if (wholeWord) {
+    const pattern = `\\b${escapeRegex(safeFind)}\\b`;
+    const flags = caseSensitive ? 'g' : 'gi';
+    return {
+      count: (text) => {
+        if (!text) return 0;
+        const matches = String(text).match(new RegExp(pattern, flags));
+        return matches ? matches.length : 0;
+      },
+      replace: (text) => String(text || '').replace(new RegExp(pattern, flags), replaceText),
+      includes: (text) => {
+        if (!text) return false;
+        return new RegExp(pattern, caseSensitive ? '' : 'i').test(String(text));
+      }
+    };
+  }
+
+  if (caseSensitive) {
+    return {
+      count: (text) => countOccurrences(String(text || ''), safeFind),
+      replace: (text) => String(text || '').split(safeFind).join(replaceText),
+      includes: (text) => String(text || '').includes(safeFind)
+    };
+  }
+
+  const regex = new RegExp(escapeRegex(safeFind), 'gi');
+  return {
+    count: (text) => {
+      if (!text) return 0;
+      const matches = String(text).match(regex);
+      return matches ? matches.length : 0;
+    },
+    replace: (text) => String(text || '').replace(regex, replaceText),
+    includes: (text) => {
+      if (!text) return false;
+      return String(text).toLowerCase().includes(safeFind.toLowerCase());
+    }
+  };
+};
+
+const normalizeArray = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter(Boolean).map(String);
+  if (typeof value === 'string') {
+    return value.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+};
+
+const normalizeTargets = (targets) => ({
+  items: targets?.items !== false,
+  subitems: Boolean(targets?.subitems),
+  docs: Boolean(targets?.docs)
+});
+
+const normalizeRules = (rules) => ({
+  caseSensitive: Boolean(rules?.caseSensitive),
+  wholeWord: Boolean(rules?.wholeWord)
+});
+
+const normalizeFilters = (filters) => ({
+  includeColumnIds: normalizeArray(filters?.includeColumnIds),
+  excludeColumnIds: normalizeArray(filters?.excludeColumnIds),
+  includeGroupIds: normalizeArray(filters?.includeGroupIds),
+  excludeGroupIds: normalizeArray(filters?.excludeGroupIds),
+  includeNameContains: normalizeArray(filters?.includeNameContains),
+  excludeNameContains: normalizeArray(filters?.excludeNameContains),
+  docIds: normalizeArray(filters?.docIds)
+});
+
+const normalizeLimit = (limit) => ({
+  maxChanges: limit?.maxChanges ? Number(limit.maxChanges) : null
+});
+
+const normalizePagination = (pagination) => ({
+  cursor: pagination?.cursor ? String(pagination.cursor) : null,
+  pageSize: pagination?.pageSize ? Math.min(Math.max(Number(pagination.pageSize) || 0, 1), 500) : null
+});
+
+const applyNameFilters = (name, includeList, excludeList) => {
+  const safeName = String(name || '');
+  const lower = safeName.toLowerCase();
+  if (includeList.length > 0) {
+    const matches = includeList.some((entry) => lower.includes(String(entry).toLowerCase()));
+    if (!matches) return false;
+  }
+  if (excludeList.length > 0) {
+    const blocked = excludeList.some((entry) => lower.includes(String(entry).toLowerCase()));
+    if (blocked) return false;
+  }
+  return true;
+};
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const fetchBoardColumns = async (token, boardIdValue) => {
+  const columnsQuery = `
+    query($id: ID!) {
+      boards(ids: [$id]) {
+        columns { id title type }
+      }
+    }
+  `;
+  const columnsRes = await axios.post('https://api.monday.com/v2', {
+    query: columnsQuery,
+    variables: { id: boardIdValue }
+  }, { headers: { Authorization: token } });
+
+  if (columnsRes.data?.errors?.length) {
+    throw new Error('Failed to load board columns');
+  }
+
+  const columns = columnsRes.data?.data?.boards?.[0]?.columns || [];
+  const eligibleColumns = columns.filter(c => c.type === 'text' || c.type === 'long_text');
+  const docColumns = columns.filter(c => c.type === 'doc');
+  const columnTitleById = new Map(columns.map(c => [c.id, c.title]));
+  return { columns, eligibleColumns, docColumns, columnTitleById };
+};
+
+const filterColumnIds = (eligibleColumns, filters) => {
+  const includeIds = filters.includeColumnIds;
+  const excludeIds = filters.excludeColumnIds;
+  let filtered = eligibleColumns;
+  if (includeIds.length > 0) {
+    const includeSet = new Set(includeIds);
+    filtered = filtered.filter(c => includeSet.has(c.id));
+  }
+  if (excludeIds.length > 0) {
+    const excludeSet = new Set(excludeIds);
+    filtered = filtered.filter(c => !excludeSet.has(c.id));
+  }
+  return filtered;
+};
+
+const extractDocIdsFromValue = (value) => {
+  if (!value) return [];
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed?.doc_id) return [String(parsed.doc_id)];
+      if (parsed?.docId) return [String(parsed.docId)];
+      if (parsed?.id) return [String(parsed.id)];
+    } catch {
+      return [];
+    }
+  }
+  if (typeof value === 'object') {
+    if (value.doc_id) return [String(value.doc_id)];
+    if (value.docId) return [String(value.docId)];
+    if (value.id) return [String(value.id)];
+  }
+  return [];
+};
+
+const parseDocIds = (columnValues, docColumnIds) => {
+  const docIds = new Set();
+  for (const col of columnValues || []) {
+    if (!docColumnIds.has(col.id)) continue;
+    const ids = extractDocIdsFromValue(col.value);
+    ids.forEach(id => docIds.add(id));
+  }
+  return docIds;
+};
+
+const fetchItemsPage = async ({ token, boardIdValue, cursor, columnIds, pageSize, includeSubitems }) => {
+  const itemsQuery = `
+    query($id: ID!, $cursor: String, $columnIds: [String!], $limit: Int) {
+      boards(ids: [$id]) {
+        items_page(limit: $limit, cursor: $cursor) {
+          cursor
+          items {
+            id
+            name
+            group { id }
+            column_values(ids: $columnIds) { id text value }
+            ${includeSubitems ? 'subitems { id name column_values { id text } board { id } }' : ''}
+          }
+        }
+      }
+    }
+  `;
+
+  const itemsRes = await axios.post('https://api.monday.com/v2', {
+    query: itemsQuery,
+    variables: { id: boardIdValue, cursor, columnIds, limit: pageSize }
+  }, { headers: { Authorization: token } });
+
+  if (itemsRes.data?.errors?.length) {
+    throw new Error('Failed to load board items');
+  }
+
+  const page = itemsRes.data?.data?.boards?.[0]?.items_page;
+  return {
+    cursor: page?.cursor || null,
+    items: page?.items || []
+  };
+};
+
+const fetchDocBlocks = async ({ token, docId }) => {
+  const docQuery = `
+    query($id: ID!) {
+      docs(ids: [$id]) {
+        id
+        name
+        blocks {
+          id
+          type
+          content
+          text
+        }
+      }
+    }
+  `;
+  const docRes = await axios.post('https://api.monday.com/v2', {
+    query: docQuery,
+    variables: { id: docId }
+  }, { headers: { Authorization: token } });
+  if (docRes.data?.errors?.length) {
+    throw new Error('Failed to load doc blocks');
+  }
+  const doc = docRes.data?.data?.docs?.[0];
+  return { docName: doc?.name || `Doc ${docId}`, blocks: doc?.blocks || [] };
+};
+
+const extractDocBlockText = (block) => {
+  if (!block) return '';
+  if (typeof block.text === 'string') return block.text;
+  if (typeof block.content === 'string') return block.content;
+  if (block.content && typeof block.content.text === 'string') return block.content.text;
+  return '';
+};
+
+const updateDocBlock = async ({ token, blockId, content }) => {
+  const mutation = `
+    mutation($id: ID!, $content: JSON!) {
+      update_doc_block(id: $id, content: $content) {
+        id
+      }
+    }
+  `;
+  const response = await axios.post('https://api.monday.com/v2', {
+    query: mutation,
+    variables: { id: blockId, content }
+  }, { headers: { Authorization: token } });
+  if (response.data?.errors?.length) {
+    throw new Error('Failed to update doc block');
+  }
+  return response.data;
 };
 
 app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
@@ -427,96 +703,406 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
   const token = getToken(accountId);
   if (!token) return res.status(401).json({ ok: false, error: 'NOT_AUTHORIZED' });
 
+  const targets = normalizeTargets(req.body?.targets);
+  const rules = normalizeRules(req.body?.rules);
+  const filters = normalizeFilters(req.body?.filters);
+  const limit = normalizeLimit(req.body?.limit);
+  const pagination = normalizePagination(req.body?.pagination);
+  const usePaging = Boolean(pagination.cursor) || Boolean(pagination.pageSize);
+
   const boardIdValue = String(boardId);
   const findText = find;
   const replaceText = typeof replace === 'string' ? replace : '';
+  const matcher = buildMatcher(findText, replaceText, rules);
+  const pageSize = pagination.pageSize || 200;
 
   try {
-    const columnsQuery = `
-      query($id: ID!) {
-        boards(ids: [$id]) {
-          columns { id title type }
-        }
-      }
-    `;
-    const columnsRes = await axios.post('https://api.monday.com/v2', {
-      query: columnsQuery,
-      variables: { id: boardIdValue }
-    }, { headers: { Authorization: token } });
+    const { eligibleColumns, docColumns, columnTitleById } = await fetchBoardColumns(token, boardIdValue);
+    const filteredColumns = filterColumnIds(eligibleColumns, filters);
+    const eligibleIds = filteredColumns.map(c => c.id);
+    const docColumnIds = new Set(docColumns.map(c => c.id));
+    const columnIdsForQuery = Array.from(new Set([...eligibleIds, ...docColumnIds]));
 
-    if (columnsRes.data?.errors?.length) {
-      return res.status(502).send('Failed to load board columns');
-    }
-
-    const columns = columnsRes.data?.data?.boards?.[0]?.columns || [];
-    const eligibleColumns = columns.filter(c => c.type === 'text' || c.type === 'long_text');
-    const eligibleIds = eligibleColumns.map(c => c.id);
-    const columnTitleById = new Map(eligibleColumns.map(c => [c.id, c.title]));
-
-    if (eligibleIds.length === 0) {
+    if (eligibleIds.length === 0 && !targets.docs) {
       return res.json({ totalMatches: 0, totalItems: 0, rows: [] });
     }
 
     const rows = [];
-    let totalMatches = 0;
     const itemIds = new Set();
-    let cursor = null;
+    let totalMatches = 0;
+    let cursor = pagination.cursor || null;
+    let limitReached = false;
+    const warnings = [];
+    const docIds = new Set(filters.docIds);
 
-    const itemsQuery = `
-      query($id: ID!, $cursor: String, $columnIds: [String!]) {
-        boards(ids: [$id]) {
-          items_page(limit: 500, cursor: $cursor) {
-            cursor
-            items {
-              id
-              name
-              column_values(ids: $columnIds) { id text }
+    do {
+      const page = await fetchItemsPage({
+        token,
+        boardIdValue,
+        cursor,
+        columnIds: columnIdsForQuery,
+        pageSize,
+        includeSubitems: targets.subitems
+      });
+      const items = page.items;
+      cursor = page.cursor;
+
+      for (const item of items) {
+        const groupId = item?.group?.id || null;
+        if (filters.includeGroupIds.length > 0 && groupId && !filters.includeGroupIds.includes(groupId)) {
+          continue;
+        }
+        if (filters.excludeGroupIds.includes(groupId)) continue;
+        if (!applyNameFilters(item?.name, filters.includeNameContains, filters.excludeNameContains)) {
+          continue;
+        }
+
+        if (targets.items) {
+          for (const col of item.column_values || []) {
+            if (!eligibleIds.includes(col.id)) continue;
+            const text = col?.text || '';
+            if (!matcher.includes(text)) continue;
+            const matchCount = matcher.count(text);
+            if (matchCount === 0) continue;
+            totalMatches += matchCount;
+            itemIds.add(item.id);
+            rows.push({
+              targetType: 'item',
+              itemId: item.id,
+              itemName: item.name,
+              columnId: col.id,
+              columnTitle: columnTitleById.get(col.id) || col.id,
+              before: truncateSnippet(text),
+              after: truncateSnippet(matcher.replace(text))
+            });
+            if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+              limitReached = true;
+              break;
             }
           }
         }
-      }
-    `;
 
-    do {
-      const itemsRes = await axios.post('https://api.monday.com/v2', {
-        query: itemsQuery,
-        variables: { id: boardIdValue, cursor, columnIds: eligibleIds }
-      }, { headers: { Authorization: token } });
-
-      if (itemsRes.data?.errors?.length) {
-        return res.status(502).send('Failed to load board items');
-      }
-
-      const page = itemsRes.data?.data?.boards?.[0]?.items_page;
-      const items = page?.items || [];
-      cursor = page?.cursor || null;
-
-      for (const item of items) {
-        for (const col of item.column_values || []) {
-          const text = col?.text || '';
-          if (!text.includes(findText)) continue;
-          const matchCount = countOccurrences(text, findText);
-          if (matchCount === 0) continue;
-          totalMatches += matchCount;
-          itemIds.add(item.id);
-          rows.push({
-            itemId: item.id,
-            itemName: item.name,
-            columnId: col.id,
-            columnTitle: columnTitleById.get(col.id) || col.id,
-            before: truncateSnippet(text),
-            after: truncateSnippet(text.split(findText).join(replaceText))
-          });
+        if (targets.docs && docColumnIds.size > 0) {
+          const docIdSet = parseDocIds(item.column_values, docColumnIds);
+          docIdSet.forEach(id => docIds.add(id));
         }
+
+        if (targets.subitems && item?.subitems?.length) {
+          for (const subitem of item.subitems) {
+            if (!applyNameFilters(subitem?.name, filters.includeNameContains, filters.excludeNameContains)) {
+              continue;
+            }
+            for (const col of subitem.column_values || []) {
+              const text = col?.text || '';
+              if (!matcher.includes(text)) continue;
+              const matchCount = matcher.count(text);
+              if (matchCount === 0) continue;
+              totalMatches += matchCount;
+              itemIds.add(subitem.id);
+              rows.push({
+                targetType: 'subitem',
+                itemId: subitem.id,
+                itemName: subitem.name,
+                columnId: col.id,
+                columnTitle: col.id,
+                before: truncateSnippet(text),
+                after: truncateSnippet(matcher.replace(text)),
+                subitemBoardId: subitem?.board?.id || null
+              });
+              if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+                limitReached = true;
+                break;
+              }
+            }
+            if (limitReached) break;
+          }
+        }
+
+        if (limitReached) break;
       }
+
+      if (limitReached || usePaging) break;
     } while (cursor);
 
+    if (targets.docs && docIds.size > 0) {
+      try {
+        for (const docId of docIds) {
+          const { docName, blocks } = await fetchDocBlocks({ token, docId });
+          for (const block of blocks) {
+            const text = extractDocBlockText(block);
+            if (!matcher.includes(text)) continue;
+            const matchCount = matcher.count(text);
+            if (matchCount === 0) continue;
+            totalMatches += matchCount;
+            rows.push({
+              targetType: 'doc_block',
+              itemId: docId,
+              itemName: docName,
+              columnId: block.id,
+              columnTitle: block.type || 'doc block',
+              before: truncateSnippet(text),
+              after: truncateSnippet(matcher.replace(text))
+            });
+            if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+              limitReached = true;
+              break;
+            }
+          }
+          if (limitReached) break;
+        }
+      } catch (e) {
+        warnings.push('Docs support pending API confirmation. Docs were skipped in this preview.');
+      }
+    }
+
     console.log(`Preview: board ${boardIdValue}, matches ${totalMatches}, items ${itemIds.size}`);
-    return res.json({ totalMatches, totalItems: itemIds.size, rows });
+    return res.json({
+      totalMatches,
+      totalItems: itemIds.size,
+      rows,
+      nextCursor: cursor,
+      limitReached,
+      warnings
+    });
   } catch (err) {
     console.error('Preview failed', err.response?.status || err.message);
     return res.status(500).send('Preview failed');
   }
+});
+
+app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
+  const { accountId, boardId, find, replace, confirmText, confirmed } = req.body || {};
+  if (!accountId) {
+    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+  }
+  if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
+    return res.status(400).send('Invalid accountId');
+  }
+  if (typeof boardId !== 'number' && typeof boardId !== 'string') {
+    return res.status(400).send('Invalid boardId');
+  }
+  if (typeof find !== 'string' || find.trim().length === 0) {
+    return res.status(400).send('Find text is required');
+  }
+  if (!confirmed && confirmText !== 'APPLY') {
+    return res.status(400).json({ ok: false, error: 'CONFIRMATION_REQUIRED' });
+  }
+
+  const token = getToken(accountId);
+  if (!token) return res.status(401).json({ ok: false, error: 'NOT_AUTHORIZED' });
+
+  const targets = normalizeTargets(req.body?.targets);
+  const rules = normalizeRules(req.body?.rules);
+  const filters = normalizeFilters(req.body?.filters);
+  const limit = normalizeLimit(req.body?.limit);
+  const boardIdValue = String(boardId);
+  const findText = find;
+  const replaceText = typeof replace === 'string' ? replace : '';
+  const matcher = buildMatcher(findText, replaceText, rules);
+  const runId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex');
+
+  try {
+    const { eligibleColumns, docColumns, columnTitleById } = await fetchBoardColumns(token, boardIdValue);
+    const filteredColumns = filterColumnIds(eligibleColumns, filters);
+    const eligibleIds = filteredColumns.map(c => c.id);
+    const docColumnIds = new Set(docColumns.map(c => c.id));
+    const columnIdsForQuery = Array.from(new Set([...eligibleIds, ...docColumnIds]));
+
+    const changes = [];
+    const docIds = new Set(filters.docIds);
+    let cursor = null;
+    let totalMatches = 0;
+    let limitReached = false;
+
+    do {
+      const page = await fetchItemsPage({
+        token,
+        boardIdValue,
+        cursor,
+        columnIds: columnIdsForQuery,
+        pageSize: 200,
+        includeSubitems: targets.subitems
+      });
+      const items = page.items;
+      cursor = page.cursor;
+
+      for (const item of items) {
+        const groupId = item?.group?.id || null;
+        if (filters.includeGroupIds.length > 0 && groupId && !filters.includeGroupIds.includes(groupId)) {
+          continue;
+        }
+        if (filters.excludeGroupIds.includes(groupId)) continue;
+        if (!applyNameFilters(item?.name, filters.includeNameContains, filters.excludeNameContains)) {
+          continue;
+        }
+
+        if (targets.items) {
+          for (const col of item.column_values || []) {
+            if (!eligibleIds.includes(col.id)) continue;
+            const text = col?.text || '';
+            if (!matcher.includes(text)) continue;
+            const matchCount = matcher.count(text);
+            if (matchCount === 0) continue;
+            totalMatches += matchCount;
+            changes.push({
+              targetType: 'item',
+              itemId: item.id,
+              itemName: item.name,
+              columnId: col.id,
+              columnTitle: columnTitleById.get(col.id) || col.id,
+              before: text,
+              after: matcher.replace(text)
+            });
+            if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+              limitReached = true;
+              break;
+            }
+          }
+        }
+
+        if (targets.docs && docColumnIds.size > 0) {
+          const docIdSet = parseDocIds(item.column_values, docColumnIds);
+          docIdSet.forEach(id => docIds.add(id));
+        }
+
+        if (targets.subitems && item?.subitems?.length) {
+          for (const subitem of item.subitems) {
+            if (!applyNameFilters(subitem?.name, filters.includeNameContains, filters.excludeNameContains)) {
+              continue;
+            }
+            for (const col of subitem.column_values || []) {
+              if (filters.includeColumnIds.length > 0 && !filters.includeColumnIds.includes(col.id)) continue;
+              if (filters.excludeColumnIds.includes(col.id)) continue;
+              const text = col?.text || '';
+              if (!matcher.includes(text)) continue;
+              const matchCount = matcher.count(text);
+              if (matchCount === 0) continue;
+              totalMatches += matchCount;
+              changes.push({
+                targetType: 'subitem',
+                itemId: subitem.id,
+                itemName: subitem.name,
+                columnId: col.id,
+                columnTitle: col.id,
+                before: text,
+                after: matcher.replace(text),
+                subitemBoardId: subitem?.board?.id || null
+              });
+              if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+                limitReached = true;
+                break;
+              }
+            }
+            if (limitReached) break;
+          }
+        }
+
+        if (limitReached) break;
+      }
+
+      if (limitReached) break;
+    } while (cursor);
+
+    const errors = [];
+    let updated = 0;
+    let skipped = 0;
+
+    const updatesByTarget = new Map();
+    const changesByTarget = new Map();
+    for (const change of changes) {
+      if (change.targetType === 'doc_block') continue;
+      const boardKey = change.targetType === 'subitem' ? change.subitemBoardId : boardIdValue;
+      if (!boardKey) {
+        skipped += 1;
+        insertAudit.run(runId, accountId, boardIdValue, change.targetType, change.itemId, change.columnId, change.before, change.after, 'skipped', 'Missing board id', Date.now());
+        continue;
+      }
+      const key = `${change.targetType}:${boardKey}:${change.itemId}`;
+      if (!updatesByTarget.has(key)) {
+        updatesByTarget.set(key, { boardId: boardKey, itemId: change.itemId, columnValues: {} });
+      }
+      if (!changesByTarget.has(key)) {
+        changesByTarget.set(key, []);
+      }
+      updatesByTarget.get(key).columnValues[change.columnId] = change.after;
+      changesByTarget.get(key).push(change);
+    }
+
+    const mutation = `
+      mutation($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
+        change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues) {
+          id
+        }
+      }
+    `;
+
+    for (const [key, payload] of updatesByTarget.entries()) {
+      try {
+        await axios.post('https://api.monday.com/v2', {
+          query: mutation,
+          variables: {
+            boardId: payload.boardId,
+            itemId: payload.itemId,
+            columnValues: payload.columnValues
+          }
+        }, { headers: { Authorization: token } });
+        updated += 1;
+        const changeList = changesByTarget.get(key) || [];
+        changeList.forEach(change => {
+          insertAudit.run(runId, accountId, boardIdValue, change.targetType, change.itemId, change.columnId, change.before, change.after, 'success', null, Date.now());
+        });
+      } catch (e) {
+        skipped += 1;
+        errors.push({ key, message: e?.response?.data || e?.message || 'Update failed' });
+        const changeList = changesByTarget.get(key) || [];
+        changeList.forEach(change => {
+          insertAudit.run(runId, accountId, boardIdValue, change.targetType, change.itemId, change.columnId, change.before, change.after, 'failed', String(e?.message || 'Update failed'), Date.now());
+        });
+      }
+      await sleep(120);
+    }
+
+    if (targets.docs && docIds.size > 0 && !(limit.maxChanges && totalMatches >= limit.maxChanges)) {
+      for (const docId of docIds) {
+        try {
+          const { blocks } = await fetchDocBlocks({ token, docId });
+          for (const block of blocks) {
+            const text = extractDocBlockText(block);
+            if (!matcher.includes(text)) continue;
+            const after = matcher.replace(text);
+            await updateDocBlock({ token, blockId: block.id, content: after });
+            updated += 1;
+            insertAudit.run(runId, accountId, boardIdValue, 'doc_block', docId, block.id, text, after, 'success', null, Date.now());
+            totalMatches += 1;
+            if (limit.maxChanges && totalMatches >= limit.maxChanges) break;
+          }
+        } catch (e) {
+          errors.push({ docId, message: e?.message || 'Doc update failed' });
+          insertAudit.run(runId, accountId, boardIdValue, 'doc_block', docId, null, null, null, 'failed', String(e?.message || 'Doc update failed'), Date.now());
+        }
+        if (limit.maxChanges && totalMatches >= limit.maxChanges) break;
+      }
+    }
+
+    return res.json({
+      ok: true,
+      runId,
+      updated,
+      skipped,
+      errors,
+      limitReached
+    });
+  } catch (err) {
+    console.error('Apply failed', err.response?.status || err.message);
+    return res.status(500).send('Apply failed');
+  }
+});
+
+app.get('/api/audit', (req, res) => {
+  const runId = req.query?.run_id || req.query?.runId;
+  if (!runId) return res.status(400).send('Missing run_id');
+  const rows = db.prepare('SELECT * FROM audit_log WHERE run_id = ? ORDER BY created_at ASC').all(runId);
+  res.json({ ok: true, runId, rows });
 });
 
 app.listen(port, () => {

@@ -4,20 +4,27 @@ import './App.css';
 import TopBar from './components/TopBar';
 import Stepper from './components/Stepper';
 import ScopeCard from './components/ScopeCard';
+import TargetsRulesCard from './components/TargetsRulesCard';
 import FindReplaceForm from './components/FindReplaceForm';
 import PreviewPanel from './components/PreviewPanel';
 import ConfirmModal from './components/ConfirmModal';
 import Toast from './components/Toast';
 import useDebouncedValue from './utils/useDebouncedValue';
 
-const PAGE_SIZE = 20;
-const APPLY_AVAILABLE = false;
+const PAGE_SIZE = 200;
+const APPLY_AVAILABLE = true;
 
 const InlineNotice = ({ tone = 'neutral', children }) => (
   <div className={`notice notice--${tone} surface-2`} role={tone === 'error' ? 'alert' : 'status'}>
     {children}
   </div>
 );
+
+const parseList = (value) =>
+  value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 
 export default function App() {
   const monday = useMemo(() => {
@@ -54,7 +61,28 @@ export default function App() {
   const [searchInput, setSearchInput] = useState('');
   const [showOnlyChanged, setShowOnlyChanged] = useState(true);
   const [compactView, setCompactView] = useState(false);
-  const [page, setPage] = useState(1);
+  const [cursorStack, setCursorStack] = useState([null]);
+  const [cursorIndex, setCursorIndex] = useState(0);
+  const [nextCursor, setNextCursor] = useState(null);
+  const [warnings, setWarnings] = useState([]);
+  const [applyOpen, setApplyOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
+  const [applyLoading, setApplyLoading] = useState(false);
+  const [lastRunId, setLastRunId] = useState('');
+
+  const [targets, setTargets] = useState({ items: true, subitems: false, docs: false });
+  const [rules, setRules] = useState({ caseSensitive: false, wholeWord: false });
+  const [filters, setFilters] = useState({
+    includeColumnIds: '',
+    excludeColumnIds: '',
+    includeGroupIds: '',
+    excludeGroupIds: '',
+    includeNameContains: '',
+    excludeNameContains: '',
+    docIds: ''
+  });
+  const [limit, setLimit] = useState({ maxChanges: '' });
+
   const authPollRef = useRef(null);
 
   const debugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
@@ -187,12 +215,38 @@ export default function App() {
   const hasAccountId = Boolean(accountId);
   const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
 
-  async function previewRun() {
+  const buildPayload = (cursor) => ({
+    accountId,
+    boardId,
+    find,
+    replace,
+    targets,
+    rules,
+    filters: {
+      includeColumnIds: parseList(filters.includeColumnIds),
+      excludeColumnIds: parseList(filters.excludeColumnIds),
+      includeGroupIds: parseList(filters.includeGroupIds),
+      excludeGroupIds: parseList(filters.excludeGroupIds),
+      includeNameContains: parseList(filters.includeNameContains),
+      excludeNameContains: parseList(filters.excludeNameContains),
+      docIds: parseList(filters.docIds)
+    },
+    limit: {
+      maxChanges: limit.maxChanges ? Number(limit.maxChanges) : undefined
+    },
+    pagination: {
+      cursor,
+      pageSize: PAGE_SIZE
+    }
+  });
+
+  const runPreview = async ({ cursor = null, reset = false } = {}) => {
     setError('');
     setAuthRequired(false);
     setPreview([]);
     setSummary({ totalMatches: 0, totalItems: 0 });
     setPreviewLoading(true);
+    setWarnings([]);
 
     if (!hasApiBase) {
       setError('Preview service is unavailable. Add VITE_API_BASE_URL and try again.');
@@ -216,6 +270,11 @@ export default function App() {
       return;
     }
 
+    if (reset) {
+      setCursorStack([null]);
+      setCursorIndex(0);
+    }
+
     const requestId = Date.now();
     const requestTime = new Date().toLocaleString();
     setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: '—' });
@@ -227,12 +286,7 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${sessionToken}`
         },
-        body: JSON.stringify({
-          accountId,
-          boardId,
-          find,
-          replace
-        })
+        body: JSON.stringify(buildPayload(cursor))
       });
       const raw = await r.text();
       setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: r.status });
@@ -269,16 +323,83 @@ export default function App() {
         totalMatches: data?.totalMatches || 0,
         totalItems: data?.totalItems || 0
       });
+      setNextCursor(data?.nextCursor || null);
+      setWarnings(data?.warnings || []);
       setToast(data?.totalMatches ? 'Preview ready.' : 'Preview ready. No matches found.');
     } catch (e) {
       setError('We could not load preview results. Try again or open Diagnostics.');
     } finally {
       setPreviewLoading(false);
     }
-  }
+  };
+
+  const handleNextPage = () => {
+    if (!nextCursor) return;
+    const newStack = [...cursorStack, nextCursor];
+    setCursorStack(newStack);
+    setCursorIndex(newStack.length - 1);
+    runPreview({ cursor: nextCursor });
+  };
+
+  const handlePrevPage = () => {
+    if (cursorIndex === 0) return;
+    const prevCursor = cursorStack[cursorIndex - 1] || null;
+    setCursorIndex(cursorIndex - 1);
+    runPreview({ cursor: prevCursor });
+  };
+
+  const runApply = async () => {
+    if (!confirmText || confirmText.trim().toUpperCase() !== 'APPLY') {
+      setError('Type APPLY to confirm.');
+      return;
+    }
+    setApplyLoading(true);
+    setError('');
+
+    const sessionToken = await getSessionToken();
+    if (!sessionToken) {
+      setError('Session token missing. Open the app inside Monday.');
+      setApplyLoading(false);
+      return;
+    }
+
+    try {
+      const r = await fetch(`${API_BASE}/api/apply`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`
+        },
+        body: JSON.stringify({
+          ...buildPayload(null),
+          confirmText: confirmText.trim().toUpperCase()
+        })
+      });
+      const raw = await r.text();
+      if (!r.ok) {
+        setError('Apply failed. Try again or open Diagnostics.');
+        return;
+      }
+      let data;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        data = null;
+      }
+      if (data?.runId) setLastRunId(data.runId);
+      setToast(`Apply complete. Updated: ${data?.updated || 0}.`);
+      setApplyOpen(false);
+      setConfirmText('');
+    } catch (e) {
+      setError('Apply failed. Try again or open Diagnostics.');
+    } finally {
+      setApplyLoading(false);
+    }
+  };
 
   const findTrimmed = find.trim();
-  const canPreview = Boolean(boardId) && findTrimmed.length >= 2 && !previewLoading && !loading && hasAccountId;
+  const targetsSelected = targets.items || targets.subitems || targets.docs;
+  const canPreview = Boolean(boardId) && findTrimmed.length >= 2 && targetsSelected && !previewLoading && !loading && hasAccountId;
   const previewDisabled = !canPreview;
   const showError = Boolean(error) && !(authRequired && error === 'Authorization is required before previewing.');
 
@@ -294,20 +415,15 @@ export default function App() {
     });
   }, [preview, debouncedSearch, showOnlyChanged]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
-  const pageRows = filteredRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const currentStep = previewLoading || preview.length > 0 ? 4 : findTrimmed.length >= 2 ? 3 : targetsSelected ? 2 : 1;
+  const applyDisabled = !APPLY_AVAILABLE || previewLoading || preview.length === 0 || summary.totalMatches === 0 || applyLoading;
 
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
-
-  useEffect(() => {
-    setPage(1);
-  }, [preview]);
-
-  const currentStep = previewLoading || preview.length > 0 ? 3 : findTrimmed.length >= 2 ? 2 : 1;
-  const applyDisabled = !APPLY_AVAILABLE;
-  const applyTooltip = 'Apply will be enabled once bulk update is available. Preview is safe.';
+  const applyStatus = APPLY_AVAILABLE ? (summary.totalMatches > 0 ? 'Ready' : 'Preview only') : 'Preview only';
+  const applyHelper = APPLY_AVAILABLE
+    ? summary.totalMatches > 0
+      ? 'Review the preview and confirm to apply.'
+      : 'Run a preview to unlock apply.'
+    : 'Bulk apply will be enabled once updates are available.';
 
   const DiagnosticsPanel = () => (
     <div className="diagnostics surface-2">
@@ -426,16 +542,31 @@ export default function App() {
 
         <ScopeCard boardId={boardId} ctxLoaded={!loading} />
 
+        <TargetsRulesCard
+          targets={targets}
+          setTargets={setTargets}
+          rules={rules}
+          setRules={setRules}
+          filters={filters}
+          setFilters={setFilters}
+          limit={limit}
+          setLimit={setLimit}
+        />
+
         <FindReplaceForm
           find={find}
           replace={replace}
           setFind={setFind}
           setReplace={setReplace}
-          onPreview={previewRun}
+          onPreview={() => runPreview({ cursor: cursorStack[cursorIndex], reset: true })}
           previewDisabled={previewDisabled}
           previewLoading={previewLoading}
           canPreview={canPreview}
         />
+
+        {!targetsSelected && (
+          <InlineNotice tone="neutral">Select at least one target to preview.</InlineNotice>
+        )}
 
         <PreviewPanel
           preview={preview}
@@ -447,27 +578,35 @@ export default function App() {
           setShowOnlyChanged={setShowOnlyChanged}
           compactView={compactView}
           setCompactView={setCompactView}
-          page={page}
-          setPage={setPage}
           filteredRows={filteredRows}
-          pageRows={pageRows}
-          totalPages={totalPages}
           find={findTrimmed}
+          hasNext={Boolean(nextCursor)}
+          hasPrev={cursorIndex > 0}
+          onNextPage={handleNextPage}
+          onPrevPage={handlePrevPage}
+          pageIndex={cursorIndex + 1}
+          warnings={warnings}
         />
 
         <section className="apply-bar surface">
           <div className="apply-meta">
             <div className="apply-row">
               <div className="apply-title">Apply changes</div>
-              <span className="pill pill-gold">Preview only</span>
+              <span className={`pill ${applyStatus === 'Ready' ? 'pill-green' : 'pill-gold'}`}>{applyStatus}</span>
             </div>
-            <div className="muted apply-helper">Bulk apply will be enabled once updates are available.</div>
+            <div className="muted apply-helper">{applyHelper}</div>
+            {lastRunId && (
+              <a className="muted" href={`${API_BASE}/api/audit?run_id=${encodeURIComponent(lastRunId)}`} target="_blank" rel="noreferrer">
+                Export audit log
+              </a>
+            )}
           </div>
           <button
             className="btn btn-secondary"
             type="button"
             disabled={applyDisabled}
-            title={applyTooltip}
+            onClick={() => setApplyOpen(true)}
+            title={applyDisabled ? 'Run a preview before applying changes.' : 'Apply changes'}
           >
             Apply changes
           </button>
@@ -478,12 +617,12 @@ export default function App() {
         <ConfirmModal title="What this does" onClose={() => setHelpOpen(false)}>
           <div className="modal-content">
             <p>
-              Bulk Find &amp; Replace scans text and long-text columns on the active board, previews matches, and keeps
-              changes safe until bulk update is available.
+              Bulk Find &amp; Replace scans items, subitems, and docs on the active board, previews matches, and applies
+              changes only after confirmation.
             </p>
             <ul className="help-list">
               <li>Preview is always safe and doesn&apos;t change data.</li>
-              <li>Review before/after diffs before deciding on next steps.</li>
+              <li>Use filters to scope results before applying.</li>
               <li>Use Diagnostics only if preview results fail to load.</li>
             </ul>
             <button
@@ -494,6 +633,28 @@ export default function App() {
               {showDiagnostics ? 'Hide diagnostics' : 'Diagnostics'}
             </button>
             {showDiagnostics && <DiagnosticsPanel />}
+          </div>
+        </ConfirmModal>
+      )}
+
+      {applyOpen && (
+        <ConfirmModal title="Confirm apply" onClose={() => setApplyOpen(false)}>
+          <div className="modal-content">
+            <p>Type APPLY to confirm and run the bulk update.</p>
+            <input
+              className="input"
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder="Type APPLY"
+            />
+            <div className="modal-actions">
+              <button className="btn btn-secondary" type="button" onClick={() => setApplyOpen(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" type="button" onClick={runApply} disabled={applyLoading}>
+                {applyLoading ? 'Applying…' : 'Confirm apply'}
+              </button>
+            </div>
           </div>
         </ConfirmModal>
       )}

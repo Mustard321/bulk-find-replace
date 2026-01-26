@@ -156,6 +156,12 @@ button {
   gap: 16px;
 }
 
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -334,6 +340,12 @@ button {
 
 .apply-helper {
   font-size: 0.85rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .skeleton-stack {

@@ -12,7 +12,7 @@ const FindReplaceForm = ({
 }) => (
   <section className="card surface">
     <div className="section-header">
-      <h2>Step 2 · Find &amp; replace</h2>
+      <h2>Step 3 · Find &amp; replace</h2>
       <span className="pill">Safe</span>
     </div>
     <div className="form-grid">

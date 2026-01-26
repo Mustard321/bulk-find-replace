@@ -22,47 +22,74 @@ cd client
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-Start tunnels (two terminals)
+Test in Monday (Vercel prod)
+1) Vercel Production URL: `https://bulk-find-replace.vercel.app`
+2) Monday Developer Center → App → Features → set Board View URL to the Vercel production URL.
+3) Open the board view in Monday and hard refresh (Cmd/Ctrl+Shift+R).
+4) If cached, remove/re-add the view or open the board in a fresh tab.
+
+API examples
+Preview
 ```sh
-cloudflared tunnel --url http://localhost:3001
-cloudflared tunnel --url http://localhost:5173
+curl -X POST "$API_BASE/api/preview" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -d '{
+    "accountId": "12345",
+    "boardId": 123456,
+    "find": "old",
+    "replace": "new",
+    "targets": { "items": true, "subitems": true, "docs": true },
+    "rules": { "caseSensitive": false, "wholeWord": false },
+    "filters": {
+      "includeColumnIds": ["text"],
+      "excludeColumnIds": ["notes"],
+      "includeGroupIds": ["topics"],
+      "excludeGroupIds": ["done"],
+      "includeNameContains": ["alpha"],
+      "excludeNameContains": ["draft"],
+      "docIds": ["12345"]
+    },
+    "limit": { "maxChanges": 200 },
+    "pagination": { "pageSize": 200, "cursor": null }
+  }'
 ```
 
-DEV QUICKSTART (exact terminal layout)
-Terminal 1 (server)
+Apply
 ```sh
-cd server
-npm start
+curl -X POST "$API_BASE/api/apply" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -d '{
+    "accountId": "12345",
+    "boardId": 123456,
+    "find": "old",
+    "replace": "new",
+    "confirmText": "APPLY",
+    "targets": { "items": true, "subitems": true, "docs": false },
+    "rules": { "caseSensitive": false, "wholeWord": false },
+    "filters": { "includeColumnIds": [], "excludeColumnIds": [] },
+    "limit": { "maxChanges": 1000 }
+  }'
 ```
 
-Terminal 2 (client)
+Audit log
+- Stored in sqlite table `audit_log` within the same database as tokens.
+- Default path: `server/tokens.db` (or `TOKENS_DB_PATH`).
+- Export JSON:
 ```sh
-cd client
-npm run dev -- --host 0.0.0.0 --port 5173
+curl "$API_BASE/api/audit?run_id=<run_id>"
 ```
+- Reset locally: stop the server and delete `server/tokens.db`.
 
-Terminal 3 (server tunnel)
-```sh
-cloudflared tunnel --url http://localhost:3001
-```
+Troubleshooting
+- 401 Not authorized: open `/auth/authorize?accountId=...` to connect or re-open inside Monday.
+- Missing accountId/boardId: reopen inside a board view.
+- Preview empty: check filters, targets, or case sensitivity.
+- Docs warning: docs API calls are best-effort; add doc IDs manually or disable docs target.
 
-Terminal 4 (client tunnel)
-```sh
-cloudflared tunnel --url http://localhost:5173
-```
-
-Paste URLs
-- Monday Board View URL = `https://<public-client-url>`
-- Monday OAuth Redirect URL = `https://<public-server-url>/auth/callback`
-- `server/.env` SERVER_BASE_URL = `https://<public-server-url>`
-- `server/.env` ALLOWED_ORIGINS includes `https://<public-client-url>,https://*.monday.com,https://*.monday.work`
-- `client/.env` VITE_API_BASE_URL = `https://<public-server-url>`
-
-Monday app settings
-- Board View URL: `https://<public-client-url>`
-- OAuth Redirect URL: `https://<public-server-url>/auth/callback`
-
-Common errors and fixes
-- `invalid_redirect_uri`: update `SERVER_BASE_URL` and Monday OAuth Redirect URL to match.
-- `401 Not authorized`: open `https://<public-server-url>/auth/authorize` to connect.
-- `CORS blocked`: ensure `ALLOWED_ORIGINS` includes the client tunnel URL and Monday domains.
+Assumptions (no web research)
+- Docs queries/mutations use `docs(ids: ...)` and `update_doc_block` with `content`.
+- Doc column values contain `doc_id`/`docId` in the raw `value` payload.
+- Subitem column values are safe to update via `change_multiple_column_values` with subitem board id.
+- Items pagination relies on `items_page` cursors; preview pagination is per items page.

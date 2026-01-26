@@ -12,12 +12,14 @@ const PreviewPanel = ({
   setShowOnlyChanged,
   compactView,
   setCompactView,
-  page,
-  setPage,
   filteredRows,
-  pageRows,
-  totalPages,
-  find
+  find,
+  hasNext,
+  hasPrev,
+  onNextPage,
+  onPrevPage,
+  pageIndex,
+  warnings
 }) => {
   const [expandedRows, setExpandedRows] = useState(new Set());
   const truncateLimit = compactView ? 140 : 240;
@@ -47,7 +49,7 @@ const PreviewPanel = ({
   return (
     <section className="card surface">
       <div className="section-header">
-        <h2>Step 3 · Preview</h2>
+        <h2>Step 4 · Preview</h2>
         <span className="pill pill-gold">Preview only</span>
       </div>
       <div className="summary-grid">
@@ -87,6 +89,14 @@ const PreviewPanel = ({
         </label>
       </div>
 
+      {warnings?.length > 0 && (
+        <div className="notice notice--neutral surface-2">
+          {warnings.map((warning) => (
+            <div key={warning}>{warning}</div>
+          ))}
+        </div>
+      )}
+
       {previewLoading && (
         <div className="skeleton-stack">
           {Array.from({ length: 4 }).map((_, idx) => (
@@ -116,9 +126,9 @@ const PreviewPanel = ({
         </div>
       )}
 
-      {!previewLoading && pageRows.length > 0 && (
+      {!previewLoading && filteredRows.length > 0 && (
         <div className="diff-list nice-scroll">
-          {pageRows.map((row, index) => {
+          {filteredRows.map((row, index) => {
             const key = `${row.itemId}-${row.columnId}-${index}`;
             return (
               <DiffRow
@@ -135,14 +145,14 @@ const PreviewPanel = ({
         </div>
       )}
 
-      {!previewLoading && filteredRows.length > 0 && totalPages > 1 && (
+      {!previewLoading && (hasNext || hasPrev) && (
         <div className="pagination">
-          <button className="btn btn-secondary" type="button" onClick={() => setPage(Math.max(1, page - 1))} disabled={page === 1}>
-            Previous
+          <button className="btn btn-secondary" type="button" onClick={onPrevPage} disabled={!hasPrev}>
+            Previous page
           </button>
-          <div className="muted">Page {page} of {totalPages}</div>
-          <button className="btn btn-secondary" type="button" onClick={() => setPage(Math.min(totalPages, page + 1))} disabled={page === totalPages}>
-            Next
+          <div className="muted">Page {pageIndex}</div>
+          <button className="btn btn-secondary" type="button" onClick={onNextPage} disabled={!hasNext}>
+            Next page
           </button>
         </div>
       )}
