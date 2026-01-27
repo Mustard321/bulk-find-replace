@@ -172,15 +172,25 @@ const buildAuthDebug = ({ authHeader, token, startsWithBearer }) => {
 };
 
 const verifyMondayJwt = (token) => {
-  const client = (process.env.MONDAY_CLIENT_SECRET || '').trim();
   const signing = (process.env.MONDAY_SIGNING_SECRET || '').trim();
-  try {
-    const decoded = jwt.verify(token, client, { algorithms: ['HS256'] });
-    return { decoded, verifiedWith: 'CLIENT' };
-  } catch {
-    const decoded = jwt.verify(token, signing, { algorithms: ['HS256'] });
-    return { decoded, verifiedWith: 'SIGNING' };
+  if (!signing) {
+    const err = new Error('Signing secret missing');
+    err.name = 'SIGNING_SECRET_MISSING';
+    throw err;
   }
+  const decoded = jwt.verify(token, signing, { algorithms: ['HS256'] });
+  return { decoded, verifiedWith: 'SIGNING' };
+};
+
+const mapJwtErrorCode = (err, debug) => {
+  if (err?.name === 'SIGNING_SECRET_MISSING') return 'SIGNING_SECRET_MISSING';
+  if (!debug?.hasDots) return 'JWT_MALFORMED';
+  if (err?.name === 'TokenExpiredError') return 'JWT_EXPIRED';
+  if (err?.name === 'JsonWebTokenError') {
+    if (String(err?.message || '').toLowerCase().includes('signature')) return 'JWT_INVALID_SIGNATURE';
+    return 'JWT_MALFORMED';
+  }
+  return 'JWT_MALFORMED';
 };
 
 const mondayAuth = (req, res, next) => {
@@ -193,13 +203,21 @@ const mondayAuth = (req, res, next) => {
     if (process.env.NODE_ENV !== 'production') {
       console.warn('[mondayAuth] missing token', { ...debug });
     }
-    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'MISSING_TOKEN', debug });
+    return res.status(401).json({
+      error: 'Unauthorized',
+      code: 'JWT_MALFORMED',
+      requestId: req.requestId
+    });
   }
   if (!debug.hasDots) {
     if (process.env.NODE_ENV !== 'production') {
       console.warn('[mondayAuth] token not jwt', { ...debug });
     }
-    return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', reason: 'TOKEN_NOT_JWT', debug });
+    return res.status(401).json({
+      error: 'Unauthorized',
+      code: 'JWT_MALFORMED',
+      requestId: req.requestId
+    });
   }
 
   try {
@@ -214,16 +232,14 @@ const mondayAuth = (req, res, next) => {
     });
     return next();
   } catch (e) {
-    const clientLen = (process.env.MONDAY_CLIENT_SECRET || '').trim().length;
     const signingLen = (process.env.MONDAY_SIGNING_SECRET || '').trim().length;
     console.warn(
-      `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} tokenLength=${debug.tokenLength} hasDots=${debug.hasDots} startsWithBearer=${debug.startsWithBearer} clientLen=${clientLen} signingLen=${signingLen}`
+      `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} tokenLength=${debug.tokenLength} hasDots=${debug.hasDots} startsWithBearer=${debug.startsWithBearer} signingLen=${signingLen}`
     );
     return res.status(401).json({
-      ok: false,
-      error: 'UNAUTHORIZED',
-      reason: e?.name || 'VERIFY_FAILED',
-      debug
+      error: 'Unauthorized',
+      code: mapJwtErrorCode(e, debug),
+      requestId: req.requestId
     });
   }
 };
@@ -262,49 +278,45 @@ app.get('/api/debug/env-check', (_req, res) => {
 });
 
 app.get('/api/debug/which-secret', (req, res) => {
-  const authHeader = req.headers.authorization || '';
-  const startsWithBearer = authHeader.startsWith('Bearer ');
-  const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
-  const tokenLooksJwt = token.split('.').length === 3;
-  if (!tokenLooksJwt) {
-    return res.json({
-      ok: false,
-      verifiedWith: null,
-      tokenLooksJwt
-    });
-  }
-  try {
-    const { decoded, verifiedWith } = verifyMondayJwt(token);
-    return res.json({
-      ok: true,
-      verifiedWith,
-      iat: decoded?.iat || null,
-      exp: decoded?.exp || null,
-      hasDat: Boolean(decoded?.dat || decoded?.data?.dat)
-    });
-  } catch {
-    return res.json({
-      ok: false,
-      verifiedWith: null,
-      tokenLooksJwt
-    });
-  }
+  return res.json({
+    ok: Boolean(signingSecret),
+    used: 'MONDAY_SIGNING_SECRET',
+    signingPresent: Boolean(signingSecret),
+    signingLen: signingSecretLen,
+    signingFp: signingSecretFp
+  });
 });
 
 app.get('/api/auth-check', mondayAuth, (req, res) => {
   res.json({ ok: true, monday: req.mondayJwt });
 });
 
-app.get('/api/debug/verify', mondayAuth, (req, res) => {
-  const dat = req.mondayDat || null;
-  const jwtData = req.mondayJwt || {};
-  res.json({
-    ok: true,
-    dat,
-    user_id: dat?.user_id || jwtData?.user_id,
-    account_id: dat?.account_id || jwtData?.account_id,
-    app_id: dat?.app_id || jwtData?.app_id
-  });
+app.get('/api/debug/verify', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const startsWithBearer = authHeader.startsWith('Bearer ');
+  const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
+  const debug = buildAuthDebug({ authHeader, token, startsWithBearer });
+  try {
+    const { decoded } = verifyMondayJwt(token);
+    const dat = decoded?.dat || decoded?.data?.dat || null;
+    return res.json({
+      ok: true,
+      tokenShape: debug,
+      datPresent: Boolean(dat),
+      user_id: dat?.user_id || decoded?.user_id || null,
+      account_id: dat?.account_id || decoded?.account_id || null,
+      app_id: dat?.app_id || decoded?.app_id || null,
+      iat: decoded?.iat || null,
+      exp: decoded?.exp || null
+    });
+  } catch (e) {
+    return res.status(401).json({
+      ok: false,
+      code: mapJwtErrorCode(e, debug),
+      tokenShape: debug,
+      requestId: req.requestId
+    });
+  }
 });
 
 app.get('/api/debug/whoami', mondayAuth, (req, res) => {
