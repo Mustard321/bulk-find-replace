@@ -30,9 +30,11 @@ Test in Monday (Vercel prod)
 
 Live test checklist (Board View)
 - Authorize if prompted (one-time).
-- Targets: Items + Subitems on, Docs optional.
-- Preview: confirm results load, paging works, and “Show only changed” is correct.
-- Apply: confirm typing APPLY is required and run_id appears in the response.
+- Step 1 (Where to look): confirm targets toggle and field/group lists load by name (no IDs shown).
+- Step 2 (What to change): run preview with a short find term.
+- Step 3 (Safety): confirm max changes default is 250 and Dry run starts ON.
+- Step 4 (Preview & apply): confirm counts, filters, and paging work; check “Show only changed”.
+- Apply: confirm typing APPLY + acknowledgement is required; successful apply shows run ID.
 - Audit export: open `/api/audit?run_id=...` and confirm rows exist.
 
 API examples
@@ -107,9 +109,14 @@ Assumptions (no web research)
 Known limitations
 - Docs support is best-effort and may skip blocks if the GraphQL schema differs.
 - Preview paging is items-page based and does not dedupe if the board changes mid-run.
+- Subitem scanning is capped per item to keep previews responsive.
 
-Marketplace readiness checklist
-- Data stored: OAuth tokens (sqlite `tokens` table) and audit log (`audit_log` table).
-- Privacy statement: note that tokens are stored to enable API calls; audit logs capture before/after text.
-- Support contact: add a support email or URL placeholder in Marketplace listing.
-- Known limitations: docs support is best-effort and may skip blocks unless doc IDs are supplied.
+Privacy/data storage notes
+- OAuth tokens are stored in sqlite (`tokens` table) to authorize Monday API calls.
+- Audit logs are stored in sqlite (`audit_log` table) with before/after text for each update.
+
+Marketplace submission checklist
+- Production URL points to `https://bulk-find-replace.vercel.app` with Production Branch = `main`.
+- Privacy statement includes token storage + audit log retention.
+- Support contact is set (email or URL).
+- Known limitations include docs best-effort and potential paging duplication.

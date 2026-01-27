@@ -333,6 +333,33 @@ button {
   overflow: auto;
 }
 
+.selected-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.selected-chips__label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--pill);
+  border: 1px solid var(--pill-border);
+  font-size: 0.85rem;
+}
+
 .advanced {
   margin-top: 12px;
   padding: 12px;
@@ -355,6 +382,39 @@ button {
 .textarea {
   min-height: 90px;
   resize: vertical;
+}
+
+.preview-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.preview-summary__title {
+  font-weight: 700;
+}
+
+.preview-summary__chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--gold-soft);
+  border: 1px solid rgba(245, 200, 75, 0.4);
+  font-size: 0.85rem;
+}
+
+.progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(11, 18, 32, 0.12);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold), var(--gold-2));
+  transition: width 0.25s ease;
 }
 
 .diff-list {
@@ -411,6 +471,7 @@ button {
   background: var(--gold-soft);
   padding: 0 2px;
   border-radius: 4px;
+  color: inherit;
 }
 
 .diff-toggle {

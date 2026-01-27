@@ -8,7 +8,7 @@ const SafetyCard = ({ limit, setLimit, dryRun, setDryRunPreference }) => (
     </div>
     <div className="grid-2">
       <label className="field">
-        <span className="field__label">Safety limit</span>
+        <span className="field__label">Maximum changes this run</span>
         <input
           className="input"
           type="number"
@@ -17,7 +17,7 @@ const SafetyCard = ({ limit, setLimit, dryRun, setDryRunPreference }) => (
           value={limit.maxChanges}
           onChange={(e) => setLimit({ maxChanges: e.target.value ? Number(e.target.value) : '' })}
         />
-        <span className="muted">Caps how many updates can be applied in one run. Default is 250.</span>
+        <span className="muted">Keeps large updates manageable. Default is 250.</span>
       </label>
       <div className="field">
         <span className="field__label">Dry run</span>

@@ -52,6 +52,12 @@ const PreviewPanel = ({
         <h2>Step 4 · Preview</h2>
         <span className="pill pill-gold">Preview only</span>
       </div>
+      <div className="preview-summary">
+        <div className="preview-summary__title">Preview summary</div>
+        <div className="preview-summary__chip">Items matched: {formatNumber(summary.totalItems)}</div>
+        <div className="preview-summary__chip">Fields matched: {formatNumber(preview.length)}</div>
+        <div className="preview-summary__chip">Total changes: {formatNumber(summary.totalMatches)}</div>
+      </div>
       <div className="summary-grid">
         {summaryCards.map((card) => (
           <div key={card.label} className="summary-card surface-2">
@@ -108,14 +114,14 @@ const PreviewPanel = ({
       {!previewLoading && preview.length === 0 && (
         <div className="empty-state">
           <div className="empty-title">Run a preview to see changes.</div>
-          <div className="muted">We only scan text and long text columns on the current board.</div>
+          <div className="muted">We only scan text and long text fields on the current board.</div>
         </div>
       )}
 
       {!previewLoading && preview.length > 0 && summary.totalMatches === 0 && (
         <div className="empty-state">
           <div className="empty-title">No matches found.</div>
-          <div className="muted">Try case-insensitive matching or check your column scope.</div>
+          <div className="muted">Try toggling Match case or Whole word only, or widen your field selection.</div>
         </div>
       )}
 

@@ -18,6 +18,7 @@ const APPLY_AVAILABLE = true;
 const AUTH_EXPIRED_MESSAGE = 'Authorization expired. Reconnect to continue.';
 const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
 const DRY_RUN_KEY = 'mustard_bfr_dry_run';
+const META_CACHE_KEY = '__BFR_BOARD_META_CACHE';
 
 const InlineNotice = ({ tone = 'neutral', children }) => (
   <div className={`notice notice--${tone} surface-2`} role={tone === 'error' ? 'alert' : 'status'}>
@@ -217,6 +218,13 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
     if (!boardId) return () => {};
+    if (typeof window === 'undefined') return () => {};
+    const cacheStore = window[META_CACHE_KEY] || {};
+    if (cacheStore[boardId]) {
+      setBoardMeta(cacheStore[boardId]);
+      setMetaLoading(false);
+      return () => {};
+    }
     setMetaLoading(true);
     setMetaError('');
     monday
@@ -232,10 +240,12 @@ export default function App() {
       .then((res) => {
         if (!mounted) return;
         const board = res?.data?.boards?.[0];
-        setBoardMeta({
+        const nextMeta = {
           columns: board?.columns || [],
           groups: board?.groups || []
-        });
+        };
+        setBoardMeta(nextMeta);
+        window[META_CACHE_KEY] = { ...cacheStore, [boardId]: nextMeta };
       })
       .catch((err) => {
         if (!mounted) return;
@@ -565,6 +575,7 @@ export default function App() {
       setToast(`Apply complete. Updated: ${data?.updated || 0}.`);
       setApplyResult({ mode: 'apply', ...buildApplyCounts(), runId: data?.runId || '' });
       setApplyOpen(false);
+      setDryRunPreference(false);
     } catch (e) {
       setError('Couldn’t apply changes. Try again. If it persists, open Diagnostics and share Request ID.');
     } finally {
@@ -650,6 +661,22 @@ export default function App() {
       : excludeColumnIds.length > 0
         ? `All text fields (excluding ${excludeColumnIds.length})`
         : 'All text fields';
+  const selectedGroupNames = groupOptions
+    .filter((group) => includeGroupIds.includes(group.id))
+    .map((group) => group.label);
+  const selectedFieldNames = textColumns
+    .filter((col) => includeColumnIds.includes(col.id))
+    .map((col) => col.label);
+  const fieldsSummary =
+    columnScope === 'custom'
+      ? selectedFieldNames.length
+        ? `Selected fields: ${selectedFieldNames.join(', ')}`
+        : 'Selected fields: none'
+      : `All text fields (${textColumns.length})`;
+  const groupsSummary = includeGroupIds.length
+    ? `Selected groups: ${selectedGroupNames.join(', ')}`
+    : `All groups (${groupOptions.length})`;
+  const dryRunSummary = dryRun ? 'Dry run: on' : 'Dry run: off';
 
   const DiagnosticsPanel = () => (
     <div className="diagnostics surface-2">
@@ -949,12 +976,30 @@ export default function App() {
         <ConfirmModal title="Confirm apply" onClose={() => setApplyOpen(false)}>
           <div className="modal-content">
             <p>
-              You are about to apply {formatNumber(applyCounts.updates)} updates across {formatNumber(applyCounts.items)} items
+              You are about to update {formatNumber(applyCounts.updates)} fields across {formatNumber(applyCounts.items)} items
               ({formatNumber(applyCounts.subitems)} subitems, {formatNumber(applyCounts.docBlocks)} docs blocks).
             </p>
+            <div className="summary-grid">
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Targets</div>
+                <div className="summary-card__value">{targetLabels.join(', ') || 'None'}</div>
+              </div>
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Fields</div>
+                <div className="summary-card__value">{fieldsSummary}</div>
+              </div>
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Groups</div>
+                <div className="summary-card__value">{groupsSummary}</div>
+              </div>
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Dry run</div>
+                <div className="summary-card__value">{dryRunSummary}</div>
+              </div>
+            </div>
             {needsRemoveConfirm && (
               <div className="notice notice--error surface-2">
-                This will remove text.
+                You are replacing with empty text. Please confirm you intend to remove the matched text.
               </div>
             )}
             <label className="toggle">
@@ -963,7 +1008,7 @@ export default function App() {
                 checked={confirmUnderstood}
                 onChange={(e) => setConfirmUnderstood(e.target.checked)}
               />
-              <span>I understand this modifies data.</span>
+              <span>I understand these changes will update my board.</span>
             </label>
             {needsRemoveConfirm && (
               <label className="toggle">
@@ -984,6 +1029,19 @@ export default function App() {
             {applyLoading && (
               <div className="muted">
                 Applying {applyProgress}/{applyTotal || summary.totalMatches || 0} · Failures {applyFailures}
+              </div>
+            )}
+            {applyLoading && (
+              <div className="progress-track" aria-hidden="true">
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      ((applyProgress || 0) / Math.max(1, applyTotal || summary.totalMatches || 1)) * 100
+                    ).toFixed(1)}%`
+                  }}
+                />
               </div>
             )}
             <div className="modal-actions">
