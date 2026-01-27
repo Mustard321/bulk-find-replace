@@ -15,7 +15,7 @@ import { formatNumber } from './utils/formatters.jsx';
 
 const PAGE_SIZE = 200;
 const APPLY_AVAILABLE = true;
-const AUTH_EXPIRED_MESSAGE = 'Authorization expired. Reconnect to continue.';
+const AUTH_EXPIRED_MESSAGE = 'Session expired. Reload the app.';
 const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
 const DRY_RUN_KEY = 'mustard_bfr_dry_run';
 const META_CACHE_KEY = '__BFR_BOARD_META_CACHE';
@@ -64,7 +64,8 @@ export default function App() {
   const [sessionTokenInfo, setSessionTokenInfo] = useState({
     present: false,
     looksJwt: false,
-    masked: ''
+    length: 0,
+    tail: ''
   });
   const [lastRequest, setLastRequest] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -91,6 +92,8 @@ export default function App() {
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [dryRun, setDryRun] = useState(true);
   const [reloadAttempted, setReloadAttempted] = useState(false);
+  const [lastAuthRefresh, setLastAuthRefresh] = useState('');
+  const [lastRequestStatus, setLastRequestStatus] = useState('—');
   const applyTimerRef = useRef(null);
   const lastFailedActionRef = useRef(null);
 
@@ -305,8 +308,9 @@ export default function App() {
   const formatTokenInfo = (token) => {
     const safe = token || '';
     const looksJwt = safe.split('.').length === 3;
-    const masked = safe.length > 24 ? `${safe.slice(0, 12)}…${safe.slice(-8)}` : safe ? `${safe.slice(0, 6)}…` : '';
-    return { present: Boolean(safe), looksJwt, masked };
+    const length = safe.length;
+    const tail = safe.length >= 6 ? safe.slice(-6) : safe;
+    return { present: Boolean(safe), looksJwt, length, tail };
   };
 
   const getSessionToken = async () => {
@@ -314,9 +318,10 @@ export default function App() {
       const tokenRes = await monday.get('sessionToken');
       const token = tokenRes?.data || '';
       setSessionTokenInfo(formatTokenInfo(token));
+      setLastAuthRefresh(new Date().toLocaleString());
       return token || null;
     } catch {
-      setSessionTokenInfo({ present: false, looksJwt: false, masked: '' });
+      setSessionTokenInfo({ present: false, looksJwt: false, length: 0, tail: '' });
       return null;
     }
   };
@@ -342,20 +347,49 @@ export default function App() {
     [boardMeta.groups]
   );
 
-  const handleReconnect = async () => {
+  const handleReconnect = () => {
     setError('');
     setAuthRequired(false);
     // sessionToken is per iframe session; OAuth token lives server-side.
     // A reload is the correct recovery for an expired sessionToken.
-    const token = await getSessionToken();
-    if (token) {
-      retryLastAction();
-      return;
-    }
     if (typeof window !== 'undefined') {
       window.sessionStorage.setItem(RELOAD_ATTEMPT_KEY, 'true');
       window.location.reload();
     }
+  };
+
+  const apiRequest = async ({ path, body }) => {
+    const attempt = async () => {
+      const token = await getSessionToken();
+      if (!token) return { error: 'NO_TOKEN' };
+      const response = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify(body)
+      });
+      setLastRequestStatus(String(response.status));
+      const text = await response.text();
+      return { response, text };
+    };
+
+    let result = await attempt();
+    if (result?.error === 'NO_TOKEN') {
+      setAuthRequired(true);
+      setError(AUTH_EXPIRED_MESSAGE);
+      return null;
+    }
+    if (result?.response?.status === 401) {
+      result = await attempt();
+      if (result?.error === 'NO_TOKEN' || result?.response?.status === 401) {
+        setAuthRequired(true);
+        setError(AUTH_EXPIRED_MESSAGE);
+        return null;
+      }
+    }
+    return result;
   };
 
   const setDryRunPreference = (value) => {
@@ -416,18 +450,6 @@ export default function App() {
       setPreviewLoading(false);
       return;
     }
-    const sessionToken = await getSessionToken();
-    if (!sessionToken) {
-      setError('Session token missing. Open the app inside Monday.');
-      setPreviewLoading(false);
-      return;
-    }
-    if (sessionToken.split('.').length !== 3) {
-      setError('Session token is not a JWT. Open the app inside Monday.');
-      setPreviewLoading(false);
-      return;
-    }
-
     if (reset) {
       setCursorStack([null]);
       setCursorIndex(0);
@@ -438,39 +460,19 @@ export default function App() {
     setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: '—' });
 
     try {
-      const r = await fetch(`${API_BASE}/api/preview`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${sessionToken}`
-        },
-        body: JSON.stringify(buildPayload(cursor))
-      });
-      const raw = await r.text();
-      const responseRequestId = r.headers.get('x-request-id') || '';
-      setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: r.status, requestId: responseRequestId });
-      if (r.status === 401) {
-        let payload;
-        try {
-          payload = raw ? JSON.parse(raw) : null;
-        } catch {
-          payload = null;
-        }
-        if (payload?.error === 'NOT_AUTHORIZED') {
-          setAuthRequired(true);
-          setError(formatRequestError(AUTH_EXPIRED_MESSAGE, responseRequestId));
-          return;
-        }
-      }
-      if (!r.ok) {
+      const result = await apiRequest({ path: '/api/preview', body: buildPayload(cursor) });
+      if (!result) return;
+      const responseRequestId = result.response.headers.get('x-request-id') || '';
+      setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: result.response.status, requestId: responseRequestId });
+      if (!result.response.ok) {
         setError(formatRequestError('We could not load preview results. Try again or open Diagnostics.', responseRequestId));
         return;
       }
       let data;
       try {
-        data = raw ? JSON.parse(raw) : null;
+        data = result.text ? JSON.parse(result.text) : null;
       } catch {
-        data = raw;
+        data = result.text;
       }
       const rows = (data?.rows || []).map((row) => ({
         ...row,
@@ -544,49 +546,25 @@ export default function App() {
       }, 350);
     }
 
-    const sessionToken = await getSessionToken();
-    if (!sessionToken) {
-      setError('Session token missing. Open the app inside Monday.');
-      setApplyLoading(false);
-      return;
-    }
-
     try {
-      const r = await fetch(`${API_BASE}/api/apply`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${sessionToken}`
-        },
-        body: JSON.stringify({
+      const result = await apiRequest({
+        path: '/api/apply',
+        body: {
           ...buildPayload(null),
           runId: previewRunId || undefined,
           confirmText: confirmText.trim().toUpperCase()
-        })
+        }
       });
-      const raw = await r.text();
-      const responseRequestId = r.headers.get('x-request-id') || '';
-      setLastRequest({ id: Date.now(), time: new Date().toLocaleString(), endpoint: `${API_BASE}/api/apply`, status: r.status, requestId: responseRequestId });
-      if (r.status === 401) {
-        let payload;
-        try {
-          payload = raw ? JSON.parse(raw) : null;
-        } catch {
-          payload = null;
-        }
-        if (payload?.error === 'NOT_AUTHORIZED' || payload?.error === 'UNAUTHORIZED') {
-          setAuthRequired(true);
-          setError(formatRequestError(AUTH_EXPIRED_MESSAGE, responseRequestId));
-          return;
-        }
-      }
-      if (!r.ok) {
+      if (!result) return;
+      const responseRequestId = result.response.headers.get('x-request-id') || '';
+      setLastRequest({ id: Date.now(), time: new Date().toLocaleString(), endpoint: `${API_BASE}/api/apply`, status: result.response.status, requestId: responseRequestId });
+      if (!result.response.ok) {
         setError(formatRequestError('Couldn’t apply changes. Try again. If it persists, open Diagnostics and share Request ID.', responseRequestId));
         return;
       }
       let data;
       try {
-        data = raw ? JSON.parse(raw) : null;
+        data = result.text ? JSON.parse(result.text) : null;
       } catch {
         data = null;
       }
@@ -733,6 +711,14 @@ export default function App() {
           <div className="diagnostics__value">{lastRequest?.status || '—'}</div>
         </div>
         <div>
+          <div className="diagnostics__label">Last auth refresh</div>
+          <div className="diagnostics__value">{lastAuthRefresh || '—'}</div>
+        </div>
+        <div>
+          <div className="diagnostics__label">Last request status</div>
+          <div className="diagnostics__value">{lastRequestStatus || '—'}</div>
+        </div>
+        <div>
           <div className="diagnostics__label">API base</div>
           <div className="diagnostics__value">{API_BASE || '—'}</div>
         </div>
@@ -740,7 +726,9 @@ export default function App() {
           <div className="diagnostics__label">Session token</div>
           <div className="diagnostics__value">
             {sessionTokenInfo.present
-              ? `Present (${sessionTokenInfo.masked})`
+              ? debugEnabled
+                ? `Present (len ${sessionTokenInfo.length}, …${sessionTokenInfo.tail})`
+                : 'Present'
               : 'Missing'}
           </div>
         </div>
@@ -804,6 +792,8 @@ export default function App() {
             <div>API: {API_BASE || 'Missing'}</div>
             <div>Last status: {lastRequest?.status ?? '—'}</div>
             <div>Request ID: {lastRequest?.requestId || '—'}</div>
+            <div>Last auth refresh: {lastAuthRefresh || '—'}</div>
+            <div>Last request status: {lastRequestStatus || '—'}</div>
             <div>Build: {buildId}</div>
             <div>Env: {buildEnv}</div>
           </div>
