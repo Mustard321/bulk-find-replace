@@ -127,6 +127,49 @@ button {
   margin-bottom: 16px;
 }
 
+.onboarding-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboarding-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.onboarding-note {
+  font-weight: 600;
+}
+
+.scope-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.scope-summary__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.scope-summary__label {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.scope-summary__value {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
 .scope-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -192,6 +235,14 @@ button {
 .notice {
   padding: 12px 16px;
   border-radius: 16px;
+}
+
+.notice__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .health-strip {
@@ -357,6 +408,18 @@ button {
 
 .apply-helper {
   font-size: 0.85rem;
+}
+
+.apply-success__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.apply-undo {
+  margin-top: 4px;
 }
 
 .modal-actions {

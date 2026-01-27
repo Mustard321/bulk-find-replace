@@ -100,7 +100,7 @@ const TargetsRulesCard = ({
           onChange={(e) => setFilters({ ...filters, includeColumnIds: e.target.value })}
           placeholder="col_1, col_2"
         />
-        <span className="muted">Leave blank for all text + long text columns.</span>
+        <span className="muted">Leave blank for all text + long text columns. Non-text IDs are ignored.</span>
       </label>
       <label className="field">
         <span className="field__label">Exclude column IDs</span>

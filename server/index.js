@@ -118,12 +118,16 @@ db.prepare(`CREATE TABLE IF NOT EXISTS audit_log (
   target_type TEXT,
   object_id TEXT,
   column_or_block_id TEXT,
+  item_name TEXT,
+  column_title TEXT,
   before TEXT,
   after TEXT,
   status TEXT,
   error TEXT,
   created_at INTEGER
 )`).run();
+try { db.prepare('ALTER TABLE audit_log ADD COLUMN item_name TEXT').run(); } catch {}
+try { db.prepare('ALTER TABLE audit_log ADD COLUMN column_title TEXT').run(); } catch {}
 
 const saveToken = (id, token) =>
   db.prepare('INSERT OR REPLACE INTO tokens VALUES (?, ?)').run(id, token);
@@ -133,8 +137,8 @@ const getToken = id =>
 
 const insertAudit = db.prepare(
   `INSERT INTO audit_log
-   (run_id, account_id, board_id, target_type, object_id, column_or_block_id, before, after, status, error, created_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+   (run_id, account_id, board_id, target_type, object_id, column_or_block_id, item_name, column_title, before, after, status, error, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 
 
@@ -142,6 +146,7 @@ const rateWindowMs = 60_000;
 const rateMax = 120;
 const rateBuckets = new Map();
 const MAX_UPDATES_PER_RUN = Number(process.env.MAX_UPDATES_PER_RUN) || 250;
+const MAX_SUBITEMS_PER_ITEM = Number(process.env.MAX_SUBITEMS_PER_ITEM) || 200;
 const rateLimit = (req, res, next) => {
   const key = req.ip || 'unknown';
   const now = Date.now();
@@ -416,23 +421,28 @@ app.get('/api/auth/status', (req, res) => {
   return res.json({ ok: true, authorized: Boolean(token) });
 });
 
+const normalizeLineEndings = (text) => String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
 const truncateSnippet = (text, max = 120) => {
   if (typeof text !== 'string') return '';
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1)}…`;
+  const normalized = normalizeLineEndings(text);
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1)}…`;
 };
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const countOccurrences = (text, find) => {
-  if (!text || !find) return 0;
+  const safeText = normalizeLineEndings(String(text || ''));
+  const safeFind = normalizeLineEndings(String(find || ''));
+  if (!safeText || !safeFind) return 0;
   let count = 0;
   let idx = 0;
   while (true) {
-    const next = text.indexOf(find, idx);
+    const next = safeText.indexOf(safeFind, idx);
     if (next === -1) break;
     count += 1;
-    idx = next + find.length;
+    idx = next + safeFind.length;
   }
   return count;
 };
@@ -440,44 +450,50 @@ const countOccurrences = (text, find) => {
 const buildMatcher = (findText, replaceText, rules = {}) => {
   const caseSensitive = Boolean(rules.caseSensitive);
   const wholeWord = Boolean(rules.wholeWord);
-  const safeFind = String(findText || '');
+  const safeFind = normalizeLineEndings(String(findText || ''));
+  const safeReplace = normalizeLineEndings(String(replaceText || ''));
+  const normalizeText = (text) => normalizeLineEndings(String(text || ''));
 
   if (wholeWord) {
     const pattern = `\\b${escapeRegex(safeFind)}\\b`;
     const flags = caseSensitive ? 'g' : 'gi';
     return {
       count: (text) => {
-        if (!text) return 0;
-        const matches = String(text).match(new RegExp(pattern, flags));
+        const safeText = normalizeText(text);
+        if (!safeText) return 0;
+        const matches = safeText.match(new RegExp(pattern, flags));
         return matches ? matches.length : 0;
       },
-      replace: (text) => String(text || '').replace(new RegExp(pattern, flags), replaceText),
+      replace: (text) => normalizeText(text).replace(new RegExp(pattern, flags), safeReplace),
       includes: (text) => {
-        if (!text) return false;
-        return new RegExp(pattern, caseSensitive ? '' : 'i').test(String(text));
+        const safeText = normalizeText(text);
+        if (!safeText) return false;
+        return new RegExp(pattern, caseSensitive ? '' : 'i').test(safeText);
       }
     };
   }
 
   if (caseSensitive) {
     return {
-      count: (text) => countOccurrences(String(text || ''), safeFind),
-      replace: (text) => String(text || '').split(safeFind).join(replaceText),
-      includes: (text) => String(text || '').includes(safeFind)
+      count: (text) => countOccurrences(text, safeFind),
+      replace: (text) => normalizeText(text).split(safeFind).join(safeReplace),
+      includes: (text) => normalizeText(text).includes(safeFind)
     };
   }
 
   const regex = new RegExp(escapeRegex(safeFind), 'gi');
   return {
     count: (text) => {
-      if (!text) return 0;
-      const matches = String(text).match(regex);
+      const safeText = normalizeText(text);
+      if (!safeText) return 0;
+      const matches = safeText.match(regex);
       return matches ? matches.length : 0;
     },
-    replace: (text) => String(text || '').replace(regex, replaceText),
+    replace: (text) => normalizeText(text).replace(regex, safeReplace),
     includes: (text) => {
-      if (!text) return false;
-      return String(text).toLowerCase().includes(safeFind.toLowerCase());
+      const safeText = normalizeText(text);
+      if (!safeText) return false;
+      return safeText.toLowerCase().includes(safeFind.toLowerCase());
     }
   };
 };
@@ -718,9 +734,9 @@ const fetchDocBlocks = async ({ token, docId }) => {
 
 const extractDocBlockText = (block) => {
   if (!block) return '';
-  if (typeof block.text === 'string') return block.text;
-  if (typeof block.content === 'string') return block.content;
-  if (block.content && typeof block.content.text === 'string') return block.content.text;
+  if (typeof block.text === 'string') return normalizeLineEndings(block.text);
+  if (typeof block.content === 'string') return normalizeLineEndings(block.content);
+  if (block.content && typeof block.content.text === 'string') return normalizeLineEndings(block.content.text);
   return '';
 };
 
@@ -805,6 +821,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
     let cursor = pagination.cursor || null;
     let limitReached = false;
     const warnings = [];
+    let subitemCapNoted = false;
     const docIds = new Set(filters.docIds);
 
     do {
@@ -832,7 +849,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
         if (targets.items) {
           for (const col of item.column_values || []) {
             if (!eligibleIds.includes(col.id)) continue;
-            const text = col?.text || '';
+            const text = normalizeLineEndings(col?.text || '');
             if (!matcher.includes(text)) continue;
             const matchCount = matcher.count(text);
             if (matchCount === 0) continue;
@@ -860,12 +877,21 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
         }
 
         if (targets.subitems && item?.subitems?.length) {
-          for (const subitem of item.subitems) {
+          const subitems = Array.isArray(item.subitems)
+            ? item.subitems.slice(0, MAX_SUBITEMS_PER_ITEM)
+            : [];
+          if (!subitemCapNoted && item.subitems.length > MAX_SUBITEMS_PER_ITEM) {
+            warnings.push(`Subitems capped at ${MAX_SUBITEMS_PER_ITEM} per item to keep previews fast.`);
+            subitemCapNoted = true;
+          }
+          for (const subitem of subitems) {
             if (!applyNameFilters(subitem?.name, filters.includeNameContains, filters.excludeNameContains)) {
               continue;
             }
             for (const col of subitem.column_values || []) {
-              const text = col?.text || '';
+              if (filters.includeColumnIds.length > 0 && !filters.includeColumnIds.includes(col.id)) continue;
+              if (filters.excludeColumnIds.includes(col.id)) continue;
+              const text = normalizeLineEndings(col?.text || '');
               if (!matcher.includes(text)) continue;
               const matchCount = matcher.count(text);
               if (matchCount === 0) continue;
@@ -1027,7 +1053,7 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
         if (targets.items) {
           for (const col of item.column_values || []) {
             if (!eligibleIds.includes(col.id)) continue;
-            const text = col?.text || '';
+            const text = normalizeLineEndings(col?.text || '');
             if (!matcher.includes(text)) continue;
             const matchCount = matcher.count(text);
             if (matchCount === 0) continue;
@@ -1054,14 +1080,20 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
         }
 
         if (targets.subitems && item?.subitems?.length) {
-          for (const subitem of item.subitems) {
+          const subitems = Array.isArray(item.subitems)
+            ? item.subitems.slice(0, MAX_SUBITEMS_PER_ITEM)
+            : [];
+          if (item.subitems.length > MAX_SUBITEMS_PER_ITEM) {
+            console.warn(`[apply] requestId=${req.requestId} subitems capped at ${MAX_SUBITEMS_PER_ITEM} for item=${item.id}`);
+          }
+          for (const subitem of subitems) {
             if (!applyNameFilters(subitem?.name, filters.includeNameContains, filters.excludeNameContains)) {
               continue;
             }
             for (const col of subitem.column_values || []) {
               if (filters.includeColumnIds.length > 0 && !filters.includeColumnIds.includes(col.id)) continue;
               if (filters.excludeColumnIds.includes(col.id)) continue;
-              const text = col?.text || '';
+              const text = normalizeLineEndings(col?.text || '');
               if (!matcher.includes(text)) continue;
               const matchCount = matcher.count(text);
               if (matchCount === 0) continue;
@@ -1102,7 +1134,21 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
       const boardKey = change.targetType === 'subitem' ? change.subitemBoardId : boardIdValue;
       if (!boardKey) {
         skipped += 1;
-        insertAudit.run(runId, accountId, boardIdValue, change.targetType, change.itemId, change.columnId, change.before, change.after, 'skipped', 'Missing board id', Date.now());
+        insertAudit.run(
+          runId,
+          accountId,
+          boardIdValue,
+          change.targetType,
+          change.itemId,
+          change.columnId,
+          change.itemName || null,
+          change.columnTitle || null,
+          change.before,
+          change.after,
+          'skipped',
+          'Missing board id',
+          Date.now()
+        );
         continue;
       }
       const key = `${change.targetType}:${boardKey}:${change.itemId}`;
@@ -1138,14 +1184,42 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
         updated += 1;
         const changeList = changesByTarget.get(key) || [];
         changeList.forEach(change => {
-          insertAudit.run(runId, accountId, boardIdValue, change.targetType, change.itemId, change.columnId, change.before, change.after, 'success', null, Date.now());
+          insertAudit.run(
+            runId,
+            accountId,
+            boardIdValue,
+            change.targetType,
+            change.itemId,
+            change.columnId,
+            change.itemName || null,
+            change.columnTitle || null,
+            change.before,
+            change.after,
+            'success',
+            null,
+            Date.now()
+          );
         });
       } catch (e) {
         skipped += 1;
         errors.push({ key, message: e?.response?.data || e?.message || 'Update failed' });
         const changeList = changesByTarget.get(key) || [];
         changeList.forEach(change => {
-          insertAudit.run(runId, accountId, boardIdValue, change.targetType, change.itemId, change.columnId, change.before, change.after, 'failed', String(e?.message || 'Update failed'), Date.now());
+          insertAudit.run(
+            runId,
+            accountId,
+            boardIdValue,
+            change.targetType,
+            change.itemId,
+            change.columnId,
+            change.itemName || null,
+            change.columnTitle || null,
+            change.before,
+            change.after,
+            'failed',
+            String(e?.message || 'Update failed'),
+            Date.now()
+          );
         });
       }
       await sleep(120);
@@ -1154,20 +1228,48 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
     if (targets.docs && docIds.size > 0 && !(effectiveMax && totalMatches >= effectiveMax)) {
       for (const docId of docIds) {
         try {
-          const { blocks } = await fetchDocBlocks({ token, docId });
+          const { docName, blocks } = await fetchDocBlocks({ token, docId });
           for (const block of blocks) {
             const text = extractDocBlockText(block);
             if (!matcher.includes(text)) continue;
             const after = matcher.replace(text);
             await withRetry(() => updateDocBlock({ token, blockId: block.id, content: after }));
             updated += 1;
-            insertAudit.run(runId, accountId, boardIdValue, 'doc_block', docId, block.id, text, after, 'success', null, Date.now());
+            insertAudit.run(
+              runId,
+              accountId,
+              boardIdValue,
+              'doc_block',
+              docId,
+              block.id,
+              docName || null,
+              block.type || null,
+              text,
+              after,
+              'success',
+              null,
+              Date.now()
+            );
             totalMatches += 1;
             if (effectiveMax && totalMatches >= effectiveMax) break;
           }
         } catch (e) {
           errors.push({ docId, message: e?.message || 'Doc update failed' });
-          insertAudit.run(runId, accountId, boardIdValue, 'doc_block', docId, null, null, null, 'failed', String(e?.message || 'Doc update failed'), Date.now());
+          insertAudit.run(
+            runId,
+            accountId,
+            boardIdValue,
+            'doc_block',
+            docId,
+            null,
+            null,
+            null,
+            null,
+            null,
+            'failed',
+            String(e?.message || 'Doc update failed'),
+            Date.now()
+          );
         }
         if (effectiveMax && totalMatches >= effectiveMax) break;
       }

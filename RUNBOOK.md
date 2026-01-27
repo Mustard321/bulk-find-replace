@@ -91,6 +91,7 @@ curl "$API_BASE/api/audit?run_id=<run_id>"
 
 Troubleshooting
 - 401 Not authorized: open `/auth/authorize?accountId=...` to connect or re-open inside Monday.
+- Authorization expired: preview/apply return 401 or `NOT_AUTHORIZED`; click Reconnect in the UI or open `/auth/authorize?accountId=...` in a new tab.
 - Missing accountId/boardId: reopen inside a board view.
 - Preview empty: check filters, targets, or case sensitivity.
 - Docs warning: docs API calls are best-effort; add doc IDs manually or disable docs target.
@@ -106,3 +107,9 @@ Assumptions (no web research)
 Known limitations
 - Docs support is best-effort and may skip blocks if the GraphQL schema differs.
 - Preview paging is items-page based and does not dedupe if the board changes mid-run.
+
+Marketplace readiness checklist
+- Data stored: OAuth tokens (sqlite `tokens` table) and audit log (`audit_log` table).
+- Privacy statement: note that tokens are stored to enable API calls; audit logs capture before/after text.
+- Support contact: add a support email or URL placeholder in Marketplace listing.
+- Known limitations: docs support is best-effort and may skip blocks unless doc IDs are supplied.

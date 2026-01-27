@@ -4,15 +4,20 @@ import './App.css';
 import TopBar from './components/TopBar';
 import Stepper from './components/Stepper';
 import ScopeCard from './components/ScopeCard';
+import ScopeSummaryCard from './components/ScopeSummaryCard';
 import TargetsRulesCard from './components/TargetsRulesCard';
 import FindReplaceForm from './components/FindReplaceForm';
 import PreviewPanel from './components/PreviewPanel';
 import ConfirmModal from './components/ConfirmModal';
 import Toast from './components/Toast';
 import useDebouncedValue from './utils/useDebouncedValue';
+import { formatNumber } from './utils/formatters.jsx';
 
 const PAGE_SIZE = 200;
 const APPLY_AVAILABLE = true;
+const AUTH_EXPIRED_MESSAGE = 'Authorization expired. Reconnect to continue.';
+const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
+const DRY_RUN_KEY = 'mustard_bfr_dry_run';
 
 const InlineNotice = ({ tone = 'neutral', children }) => (
   <div className={`notice notice--${tone} surface-2`} role={tone === 'error' ? 'alert' : 'status'}>
@@ -70,12 +75,17 @@ export default function App() {
   const [warnings, setWarnings] = useState([]);
   const [applyOpen, setApplyOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
+  const [confirmUnderstood, setConfirmUnderstood] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [applyLoading, setApplyLoading] = useState(false);
   const [applyProgress, setApplyProgress] = useState(0);
   const [applyTotal, setApplyTotal] = useState(0);
   const [applyFailures, setApplyFailures] = useState(0);
   const [lastRunId, setLastRunId] = useState('');
   const [previewRunId, setPreviewRunId] = useState('');
+  const [applyResult, setApplyResult] = useState(null);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [dryRun, setDryRun] = useState(true);
   const applyTimerRef = useRef(null);
 
   const [targets, setTargets] = useState({ items: true, subitems: false, docs: false });
@@ -158,6 +168,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const seen = window.localStorage.getItem(ONBOARDING_KEY) === 'true';
+    if (!seen) {
+      setOnboardingOpen(true);
+      window.localStorage.setItem(ONBOARDING_KEY, 'true');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const saved = window.localStorage.getItem(DRY_RUN_KEY);
+    if (saved === null) {
+      setDryRun(true);
+      window.localStorage.setItem(DRY_RUN_KEY, 'true');
+    } else {
+      setDryRun(saved === 'true');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (applyOpen) return;
+    setConfirmText('');
+    setConfirmUnderstood(false);
+    setConfirmRemove(false);
+  }, [applyOpen]);
+
+  useEffect(() => {
     const handler = (e) => {
       if (e?.data?.type !== 'BFR_OAUTH_OK') return;
       const accountId = String(e.data.accountId || '');
@@ -227,6 +264,27 @@ export default function App() {
   const hasAccountId = Boolean(accountId);
   const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
 
+  const handleReconnect = () => {
+    if (!hasAccountId) {
+      setError('Missing accountId.');
+      alert('Missing accountId from Monday context. Open console and screenshot debug box.');
+      return;
+    }
+    if (!authorizeUrl) {
+      setError('Authorization URL is unavailable. Check VITE_API_BASE_URL.');
+      return;
+    }
+    monday.execute('openLink', { url: authorizeUrl, target: 'newTab' });
+    startAuthPoll(accountId);
+  };
+
+  const setDryRunPreference = (value) => {
+    setDryRun(value);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(DRY_RUN_KEY, value ? 'true' : 'false');
+    }
+  };
+
   const buildPayload = (cursor) => ({
     accountId,
     boardId,
@@ -259,6 +317,13 @@ export default function App() {
     setSummary({ totalMatches: 0, totalItems: 0 });
     setPreviewLoading(true);
     setWarnings([]);
+    setApplyResult(null);
+
+    if (find.trim() && replace === find) {
+      setError('Nothing to change.');
+      setPreviewLoading(false);
+      return;
+    }
 
     if (!hasApiBase) {
       setError('Preview service is unavailable. Add VITE_API_BASE_URL and try again.');
@@ -312,7 +377,7 @@ export default function App() {
         }
         if (payload?.error === 'NOT_AUTHORIZED') {
           setAuthRequired(true);
-          setError(formatRequestError('Authorization is required before previewing.', responseRequestId));
+          setError(formatRequestError(AUTH_EXPIRED_MESSAGE, responseRequestId));
           return;
         }
       }
@@ -363,8 +428,23 @@ export default function App() {
   };
 
   const runApply = async () => {
+    if (find.trim() && replace === find) {
+      setError('Nothing to change.');
+      return;
+    }
     if (!confirmText || confirmText.trim().toUpperCase() !== 'APPLY') {
       setError('Type APPLY to confirm.');
+      return;
+    }
+    if (!confirmUnderstood || (replace.length === 0 && !confirmRemove)) {
+      setError('Confirm the acknowledgement to continue.');
+      return;
+    }
+    if (dryRun) {
+      const counts = buildApplyCounts();
+      setApplyResult({ mode: 'dry', ...counts });
+      setToast(`Dry run complete. Would apply ${formatNumber(counts.updates)} updates.`);
+      setApplyOpen(false);
       return;
     }
     setApplyLoading(true);
@@ -405,6 +485,19 @@ export default function App() {
       const raw = await r.text();
       const responseRequestId = r.headers.get('x-request-id') || '';
       setLastRequest({ id: Date.now(), time: new Date().toLocaleString(), endpoint: `${API_BASE}/api/apply`, status: r.status, requestId: responseRequestId });
+      if (r.status === 401) {
+        let payload;
+        try {
+          payload = raw ? JSON.parse(raw) : null;
+        } catch {
+          payload = null;
+        }
+        if (payload?.error === 'NOT_AUTHORIZED' || payload?.error === 'UNAUTHORIZED') {
+          setAuthRequired(true);
+          setError(formatRequestError(AUTH_EXPIRED_MESSAGE, responseRequestId));
+          return;
+        }
+      }
       if (!r.ok) {
         setError(formatRequestError('Couldn’t apply changes. Try again. If it persists, open Diagnostics and share Request ID.', responseRequestId));
         return;
@@ -419,8 +512,8 @@ export default function App() {
       setApplyProgress(data?.updated || 0);
       setApplyFailures(data?.errors?.length || 0);
       setToast(`Apply complete. Updated: ${data?.updated || 0}.`);
+      setApplyResult({ mode: 'apply', ...buildApplyCounts(), runId: data?.runId || '' });
       setApplyOpen(false);
-      setConfirmText('');
     } catch (e) {
       setError('Couldn’t apply changes. Try again. If it persists, open Diagnostics and share Request ID.');
     } finally {
@@ -436,7 +529,8 @@ export default function App() {
   const targetsSelected = targets.items || targets.subitems || targets.docs;
   const canPreview = Boolean(boardId) && findTrimmed.length >= 2 && targetsSelected && !previewLoading && !loading && hasAccountId;
   const previewDisabled = !canPreview;
-  const showError = Boolean(error) && !(authRequired && error === 'Authorization is required before previewing.');
+  const showError = Boolean(error) && !(authRequired && error.startsWith(AUTH_EXPIRED_MESSAGE));
+  const needsRemoveConfirm = replace.length === 0 && findTrimmed.length > 0;
 
   const debouncedSearch = useDebouncedValue(searchInput);
   const filteredRows = useMemo(() => {
@@ -459,6 +553,57 @@ export default function App() {
       ? 'Review the preview and confirm to apply.'
       : 'Run a preview to unlock apply.'
     : 'Bulk apply will be enabled once updates are available.';
+
+  const buildApplyCounts = () => {
+    const itemIds = new Set();
+    const subitemIds = new Set();
+    const docBlockIds = new Set();
+    preview.forEach((row) => {
+      if (row.targetType === 'item') itemIds.add(row.itemId);
+      if (row.targetType === 'subitem') subitemIds.add(row.itemId);
+      if (row.targetType === 'doc_block') docBlockIds.add(`${row.itemId}:${row.columnId}`);
+    });
+    return {
+      updates: summary.totalMatches || 0,
+      items: itemIds.size,
+      subitems: subitemIds.size,
+      docBlocks: docBlockIds.size
+    };
+  };
+
+  const applyCounts = buildApplyCounts();
+  const confirmReady =
+    confirmText.trim().toUpperCase() === 'APPLY' &&
+    confirmUnderstood &&
+    (!needsRemoveConfirm || confirmRemove) &&
+    !applyLoading;
+
+  const targetLabels = [
+    targets.items && 'Items',
+    targets.subitems && 'Subitems',
+    targets.docs && 'Docs'
+  ].filter(Boolean);
+  const includeColumnIds = parseList(filters.includeColumnIds);
+  const excludeColumnIds = parseList(filters.excludeColumnIds);
+  const includeGroupIds = parseList(filters.includeGroupIds);
+  const excludeGroupIds = parseList(filters.excludeGroupIds);
+  const includeNameContains = parseList(filters.includeNameContains);
+  const excludeNameContains = parseList(filters.excludeNameContains);
+  const docIds = parseList(filters.docIds);
+  const filtersActive =
+    includeColumnIds.length > 0 ||
+    excludeColumnIds.length > 0 ||
+    includeGroupIds.length > 0 ||
+    excludeGroupIds.length > 0 ||
+    includeNameContains.length > 0 ||
+    excludeNameContains.length > 0 ||
+    docIds.length > 0;
+  const columnRule =
+    includeColumnIds.length > 0
+      ? `Custom include (${includeColumnIds.length})`
+      : excludeColumnIds.length > 0
+        ? `Text + long text, excluding ${excludeColumnIds.length}`
+        : 'Text + long text (default)';
 
   const DiagnosticsPanel = () => (
     <div className="diagnostics surface-2">
@@ -519,6 +664,32 @@ export default function App() {
       <main className="content">
         <Stepper currentStep={currentStep} connected={Boolean(boardId)} />
 
+        <section className="card surface">
+          <div className="section-header">
+            <h2>How to use</h2>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setOnboardingOpen((prev) => !prev)}
+              aria-expanded={onboardingOpen}
+            >
+              {onboardingOpen ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          {onboardingOpen && (
+            <div className="onboarding-body">
+              <ol className="onboarding-steps">
+                <li>Choose targets to scan.</li>
+                <li>Preview the changes (safe, no data changes).</li>
+                <li>Apply to update data. You can undo using the audit log.</li>
+              </ol>
+              <div className="onboarding-note">
+                Recommended first run: set max changes to 5.
+              </div>
+            </div>
+          )}
+        </section>
+
         {debugEnabled && (
           <div className="health-strip surface-2">
             <div>Board: {boardId ? 'Present' : 'Missing'}</div>
@@ -548,43 +719,24 @@ export default function App() {
         )}
 
         {authRequired && (
-          <section className="card surface">
-            <div className="section-header">
-              <h2>Authorize Mustard</h2>
-              <span className="pill">Required</span>
-            </div>
-            <p className="muted">Connect your Monday account to load previews.</p>
-            <div className="auth-actions">
-              <button
-                className="btn btn-primary"
-                type="button"
-                onClick={() => {
-                  if (!hasAccountId) {
-                    setError('Missing accountId.');
-                    alert('Missing accountId from Monday context. Open console and screenshot debug box.');
-                    return;
-                  }
-                  monday.execute('openLink', { url: authorizeUrl, target: 'newTab' });
-                  startAuthPoll(accountId);
-                }}
-                disabled={!hasAccountId}
-              >
-                Authorize
-              </button>
-              <button
-                className="btn btn-secondary"
-                type="button"
-                onClick={() => {
-                  if (!authorizeUrl) return;
-                  navigator.clipboard?.writeText(authorizeUrl).catch(() => {});
-                }}
-              >
-                Copy link
+          <InlineNotice tone="error">
+            <div className="notice__row">
+              <div>{AUTH_EXPIRED_MESSAGE}</div>
+              <button className="btn btn-primary" type="button" onClick={handleReconnect} disabled={!hasAccountId}>
+                Reconnect
               </button>
             </div>
-            <div className="muted">If the popup is blocked, paste the copied link into a new tab.</div>
-          </section>
+            <div className="muted">Reconnect to refresh permissions and continue previews or applies.</div>
+          </InlineNotice>
         )}
+
+        <ScopeSummaryCard
+          boardId={boardId}
+          ctxLoaded={!loading}
+          targetsLabel={targetLabels.length ? `${targetLabels.length} selected (${targetLabels.join(', ')})` : 'None selected'}
+          columnRule={columnRule}
+          filtersActive={filtersActive}
+        />
 
         <ScopeCard boardId={boardId} ctxLoaded={!loading} />
 
@@ -634,6 +786,46 @@ export default function App() {
           warnings={warnings}
         />
 
+        {applyResult && (
+          <section className="card surface">
+            <div className="section-header">
+              <h2>{applyResult.mode === 'dry' ? 'Dry run complete' : 'Apply complete'}</h2>
+              <span className={`pill ${applyResult.mode === 'dry' ? 'pill-gold' : 'pill-green'}`}>
+                {applyResult.mode === 'dry' ? 'No changes applied' : 'Success'}
+              </span>
+            </div>
+            <div className="summary-grid">
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Updates</div>
+                <div className="summary-card__value">{formatNumber(applyResult.updates)}</div>
+              </div>
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Items</div>
+                <div className="summary-card__value">{formatNumber(applyResult.items)}</div>
+              </div>
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Subitems</div>
+                <div className="summary-card__value">{formatNumber(applyResult.subitems)}</div>
+              </div>
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Docs blocks</div>
+                <div className="summary-card__value">{formatNumber(applyResult.docBlocks)}</div>
+              </div>
+            </div>
+            {applyResult.mode !== 'dry' && applyResult.runId && (
+              <div className="apply-success__meta">
+                <div className="muted">Run ID: {applyResult.runId}</div>
+                <a className="btn btn-secondary" href={`${API_BASE}/api/audit?run_id=${encodeURIComponent(applyResult.runId)}`} target="_blank" rel="noreferrer">
+                  Export audit log
+                </a>
+              </div>
+            )}
+            <div className="muted apply-undo">
+              Undo plan: re-run with swapped find/replace using the audit log as reference.
+            </div>
+          </section>
+        )}
+
         <section className="apply-bar surface">
           <div className="apply-meta">
             <div className="apply-row">
@@ -647,6 +839,14 @@ export default function App() {
               </a>
             )}
           </div>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={dryRun}
+              onChange={(e) => setDryRunPreference(e.target.checked)}
+            />
+            <span>Dry run (no changes)</span>
+          </label>
           <button
             className="btn btn-secondary"
             type="button"
@@ -654,7 +854,7 @@ export default function App() {
             onClick={() => setApplyOpen(true)}
             title={applyDisabled ? 'Run a preview before applying changes.' : 'Apply changes'}
           >
-            Apply changes
+            {dryRun ? 'Run dry run' : 'Apply changes'}
           </button>
         </section>
       </main>
@@ -686,17 +886,33 @@ export default function App() {
       {applyOpen && (
         <ConfirmModal title="Confirm apply" onClose={() => setApplyOpen(false)}>
           <div className="modal-content">
-            <p>Type APPLY to confirm and run the bulk update.</p>
-            <div className="summary-grid">
-              <div className="summary-card surface-2">
-                <div className="summary-card__label">Items</div>
-                <div className="summary-card__value">{summary.totalItems}</div>
+            <p>
+              You are about to apply {formatNumber(applyCounts.updates)} updates across {formatNumber(applyCounts.items)} items
+              ({formatNumber(applyCounts.subitems)} subitems, {formatNumber(applyCounts.docBlocks)} docs blocks).
+            </p>
+            {needsRemoveConfirm && (
+              <div className="notice notice--error surface-2">
+                This will remove text.
               </div>
-              <div className="summary-card surface-2">
-                <div className="summary-card__label">Matches</div>
-                <div className="summary-card__value">{summary.totalMatches}</div>
-              </div>
-            </div>
+            )}
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={confirmUnderstood}
+                onChange={(e) => setConfirmUnderstood(e.target.checked)}
+              />
+              <span>I understand this modifies data.</span>
+            </label>
+            {needsRemoveConfirm && (
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={confirmRemove}
+                  onChange={(e) => setConfirmRemove(e.target.checked)}
+                />
+                <span>I understand this will remove text.</span>
+              </label>
+            )}
             <input
               className="input"
               value={confirmText}
@@ -712,8 +928,8 @@ export default function App() {
               <button className="btn btn-secondary" type="button" onClick={() => setApplyOpen(false)}>
                 Cancel
               </button>
-              <button className="btn btn-primary" type="button" onClick={runApply} disabled={applyLoading}>
-                {applyLoading ? 'Applying…' : 'Confirm apply'}
+              <button className="btn btn-primary" type="button" onClick={runApply} disabled={!confirmReady}>
+                {applyLoading ? 'Applying…' : dryRun ? 'Confirm dry run' : 'Confirm apply'}
               </button>
             </div>
           </div>
