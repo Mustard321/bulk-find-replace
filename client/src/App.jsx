@@ -43,6 +43,8 @@ export default function App() {
   }, []);
   const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
   const hasApiBase = Boolean(API_BASE);
+  const buildId = import.meta.env.VITE_COMMIT_SHA || import.meta.env.VITE_APP_VERSION || 'unknown';
+  const buildEnv = import.meta.env.PROD ? 'production' : import.meta.env.MODE || 'unknown';
 
   const [ctx, setCtx] = useState(null);
   const [ctxRaw, setCtxRaw] = useState(null);
@@ -698,6 +700,8 @@ export default function App() {
             <div>API: {API_BASE || 'Missing'}</div>
             <div>Last status: {lastRequest?.status ?? '—'}</div>
             <div>Request ID: {lastRequest?.requestId || '—'}</div>
+            <div>Build: {buildId}</div>
+            <div>Env: {buildEnv}</div>
           </div>
         )}
 
