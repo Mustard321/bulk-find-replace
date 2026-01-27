@@ -19,6 +19,7 @@ const AUTH_EXPIRED_MESSAGE = 'Authorization expired. Reconnect to continue.';
 const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
 const DRY_RUN_KEY = 'mustard_bfr_dry_run';
 const META_CACHE_KEY = '__BFR_BOARD_META_CACHE';
+const RELOAD_ATTEMPT_KEY = 'bfr_reload_attempted';
 
 const InlineNotice = ({ tone = 'neutral', children }) => (
   <div className={`notice notice--${tone} surface-2`} role={tone === 'error' ? 'alert' : 'status'}>
@@ -89,7 +90,9 @@ export default function App() {
   const [applyResult, setApplyResult] = useState(null);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [dryRun, setDryRun] = useState(true);
+  const [reloadAttempted, setReloadAttempted] = useState(false);
   const applyTimerRef = useRef(null);
+  const lastFailedActionRef = useRef(null);
 
   const [targets, setTargets] = useState({ items: true, subitems: false, docs: false });
   const [rules, setRules] = useState({ caseSensitive: false, wholeWord: false });
@@ -197,6 +200,20 @@ export default function App() {
     setConfirmUnderstood(false);
     setConfirmRemove(false);
   }, [applyOpen]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const attempted = window.sessionStorage.getItem(RELOAD_ATTEMPT_KEY) === 'true';
+    setReloadAttempted(attempted);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!authRequired) {
+      window.sessionStorage.removeItem(RELOAD_ATTEMPT_KEY);
+      setReloadAttempted(false);
+    }
+  }, [authRequired]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -325,18 +342,20 @@ export default function App() {
     [boardMeta.groups]
   );
 
-  const handleReconnect = () => {
-    if (!hasAccountId) {
-      setError('Missing accountId.');
-      alert('Missing accountId from Monday context. Open console and screenshot debug box.');
+  const handleReconnect = async () => {
+    setError('');
+    setAuthRequired(false);
+    // sessionToken is per iframe session; OAuth token lives server-side.
+    // A reload is the correct recovery for an expired sessionToken.
+    const token = await getSessionToken();
+    if (token) {
+      retryLastAction();
       return;
     }
-    if (!authorizeUrl) {
-      setError('Authorization URL is unavailable. Check VITE_API_BASE_URL.');
-      return;
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem(RELOAD_ATTEMPT_KEY, 'true');
+      window.location.reload();
     }
-    monday.execute('openLink', { url: authorizeUrl, target: 'newTab' });
-    startAuthPoll(accountId);
   };
 
   const setDryRunPreference = (value) => {
@@ -379,6 +398,7 @@ export default function App() {
     setPreviewLoading(true);
     setWarnings([]);
     setApplyResult(null);
+    lastFailedActionRef.current = { type: 'preview', cursor, reset };
 
     if (find.trim() && replace === find) {
       setError('Nothing to change.');
@@ -501,6 +521,7 @@ export default function App() {
       setError('Confirm the acknowledgement to continue.');
       return;
     }
+    lastFailedActionRef.current = { type: 'apply' };
     if (dryRun) {
       const counts = buildApplyCounts();
       setApplyResult({ mode: 'dry', ...counts });
@@ -641,6 +662,18 @@ export default function App() {
     confirmUnderstood &&
     (!needsRemoveConfirm || confirmRemove) &&
     !applyLoading;
+
+  const retryLastAction = () => {
+    const last = lastFailedActionRef.current;
+    if (!last) return;
+    if (last.type === 'preview') {
+      runPreview({ cursor: last.cursor, reset: last.reset });
+      return;
+    }
+    if (last.type === 'apply' && confirmReady && !applyLoading) {
+      runApply();
+    }
+  };
 
   const targetLabels = [
     targets.items && 'Items',
@@ -797,11 +830,14 @@ export default function App() {
           <InlineNotice tone="error">
             <div className="notice__row">
               <div>{AUTH_EXPIRED_MESSAGE}</div>
-              <button className="btn btn-primary" type="button" onClick={handleReconnect} disabled={!hasAccountId}>
-                Reconnect
+              <button className="btn btn-primary" type="button" onClick={handleReconnect}>
+                Reload app
               </button>
             </div>
-            <div className="muted">Reconnect to refresh permissions and continue previews or applies.</div>
+            <div className="muted">Your session expired. Reloading will restore access.</div>
+            {reloadAttempted && (
+              <div className="muted">If this keeps happening, remove and re-add the app view.</div>
+            )}
           </InlineNotice>
         )}
 
