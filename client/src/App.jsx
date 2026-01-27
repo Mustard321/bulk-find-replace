@@ -26,6 +26,9 @@ const parseList = (value) =>
     .map((entry) => entry.trim())
     .filter(Boolean);
 
+const formatRequestError = (message, requestId) =>
+  requestId ? `${message} Request ID: ${requestId}.` : message;
+
 export default function App() {
   const monday = useMemo(() => {
     if (window.__BFR_MONDAY) return window.__BFR_MONDAY;
@@ -68,7 +71,12 @@ export default function App() {
   const [applyOpen, setApplyOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [applyLoading, setApplyLoading] = useState(false);
+  const [applyProgress, setApplyProgress] = useState(0);
+  const [applyTotal, setApplyTotal] = useState(0);
+  const [applyFailures, setApplyFailures] = useState(0);
   const [lastRunId, setLastRunId] = useState('');
+  const [previewRunId, setPreviewRunId] = useState('');
+  const applyTimerRef = useRef(null);
 
   const [targets, setTargets] = useState({ items: true, subitems: false, docs: false });
   const [rules, setRules] = useState({ caseSensitive: false, wholeWord: false });
@@ -143,6 +151,10 @@ export default function App() {
 
   useEffect(() => () => {
     if (authPollRef.current) clearInterval(authPollRef.current);
+  }, []);
+
+  useEffect(() => () => {
+    if (applyTimerRef.current) clearInterval(applyTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -289,7 +301,8 @@ export default function App() {
         body: JSON.stringify(buildPayload(cursor))
       });
       const raw = await r.text();
-      setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: r.status });
+      const responseRequestId = r.headers.get('x-request-id') || '';
+      setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: r.status, requestId: responseRequestId });
       if (r.status === 401) {
         let payload;
         try {
@@ -299,12 +312,12 @@ export default function App() {
         }
         if (payload?.error === 'NOT_AUTHORIZED') {
           setAuthRequired(true);
-          setError('Authorization is required before previewing.');
+          setError(formatRequestError('Authorization is required before previewing.', responseRequestId));
           return;
         }
       }
       if (!r.ok) {
-        setError('We could not load preview results. Try again or open Diagnostics.');
+        setError(formatRequestError('We could not load preview results. Try again or open Diagnostics.', responseRequestId));
         return;
       }
       let data;
@@ -325,6 +338,7 @@ export default function App() {
       });
       setNextCursor(data?.nextCursor || null);
       setWarnings(data?.warnings || []);
+      setPreviewRunId(data?.runId || '');
       setToast(data?.totalMatches ? 'Preview ready.' : 'Preview ready. No matches found.');
     } catch (e) {
       setError('We could not load preview results. Try again or open Diagnostics.');
@@ -355,6 +369,18 @@ export default function App() {
     }
     setApplyLoading(true);
     setError('');
+    setApplyTotal(summary.totalMatches || 0);
+    setApplyProgress(0);
+    setApplyFailures(0);
+    if (applyTimerRef.current) clearInterval(applyTimerRef.current);
+    if (summary.totalMatches) {
+      applyTimerRef.current = setInterval(() => {
+        setApplyProgress((prev) => {
+          const next = prev + Math.max(1, Math.ceil(summary.totalMatches / 20));
+          return Math.min(next, summary.totalMatches);
+        });
+      }, 350);
+    }
 
     const sessionToken = await getSessionToken();
     if (!sessionToken) {
@@ -372,12 +398,15 @@ export default function App() {
         },
         body: JSON.stringify({
           ...buildPayload(null),
+          runId: previewRunId || undefined,
           confirmText: confirmText.trim().toUpperCase()
         })
       });
       const raw = await r.text();
+      const responseRequestId = r.headers.get('x-request-id') || '';
+      setLastRequest({ id: Date.now(), time: new Date().toLocaleString(), endpoint: `${API_BASE}/api/apply`, status: r.status, requestId: responseRequestId });
       if (!r.ok) {
-        setError('Apply failed. Try again or open Diagnostics.');
+        setError(formatRequestError('Couldn’t apply changes. Try again. If it persists, open Diagnostics and share Request ID.', responseRequestId));
         return;
       }
       let data;
@@ -387,13 +416,19 @@ export default function App() {
         data = null;
       }
       if (data?.runId) setLastRunId(data.runId);
+      setApplyProgress(data?.updated || 0);
+      setApplyFailures(data?.errors?.length || 0);
       setToast(`Apply complete. Updated: ${data?.updated || 0}.`);
       setApplyOpen(false);
       setConfirmText('');
     } catch (e) {
-      setError('Apply failed. Try again or open Diagnostics.');
+      setError('Couldn’t apply changes. Try again. If it persists, open Diagnostics and share Request ID.');
     } finally {
       setApplyLoading(false);
+      if (applyTimerRef.current) {
+        clearInterval(applyTimerRef.current);
+        applyTimerRef.current = null;
+      }
     }
   };
 
@@ -483,6 +518,17 @@ export default function App() {
       <TopBar onHelp={() => setHelpOpen(true)} />
       <main className="content">
         <Stepper currentStep={currentStep} connected={Boolean(boardId)} />
+
+        {debugEnabled && (
+          <div className="health-strip surface-2">
+            <div>Board: {boardId ? 'Present' : 'Missing'}</div>
+            <div>Account: {hasAccountId ? 'Present' : 'Missing'}</div>
+            <div>Token: {sessionTokenInfo.present ? 'Present' : 'Missing'}</div>
+            <div>API: {API_BASE || 'Missing'}</div>
+            <div>Last status: {lastRequest?.status ?? '—'}</div>
+            <div>Request ID: {lastRequest?.requestId || '—'}</div>
+          </div>
+        )}
 
         {!hasApiBase && (
           <InlineNotice tone="error">Missing VITE_API_BASE_URL. Set the client env var and redeploy.</InlineNotice>
@@ -641,12 +687,27 @@ export default function App() {
         <ConfirmModal title="Confirm apply" onClose={() => setApplyOpen(false)}>
           <div className="modal-content">
             <p>Type APPLY to confirm and run the bulk update.</p>
+            <div className="summary-grid">
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Items</div>
+                <div className="summary-card__value">{summary.totalItems}</div>
+              </div>
+              <div className="summary-card surface-2">
+                <div className="summary-card__label">Matches</div>
+                <div className="summary-card__value">{summary.totalMatches}</div>
+              </div>
+            </div>
             <input
               className="input"
               value={confirmText}
               onChange={(e) => setConfirmText(e.target.value)}
               placeholder="Type APPLY"
             />
+            {applyLoading && (
+              <div className="muted">
+                Applying {applyProgress}/{applyTotal || summary.totalMatches || 0} · Failures {applyFailures}
+              </div>
+            )}
             <div className="modal-actions">
               <button className="btn btn-secondary" type="button" onClick={() => setApplyOpen(false)}>
                 Cancel

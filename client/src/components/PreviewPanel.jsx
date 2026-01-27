@@ -115,7 +115,7 @@ const PreviewPanel = ({
       {!previewLoading && preview.length > 0 && summary.totalMatches === 0 && (
         <div className="empty-state">
           <div className="empty-title">No matches found.</div>
-          <div className="muted">Try a shorter phrase or adjust the find text.</div>
+          <div className="muted">Try case-insensitive matching or check your column scope.</div>
         </div>
       )}
 

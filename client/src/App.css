@@ -174,6 +174,14 @@ button {
   text-transform: uppercase;
 }
 
+.targets-active {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
 .form-actions {
   display: flex;
   flex-direction: column;
@@ -184,6 +192,15 @@ button {
 .notice {
   padding: 12px 16px;
   border-radius: 16px;
+}
+
+.health-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 0.85rem;
 }
 
 .notice--error {

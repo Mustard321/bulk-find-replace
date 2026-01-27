@@ -28,6 +28,13 @@ Test in Monday (Vercel prod)
 3) Open the board view in Monday and hard refresh (Cmd/Ctrl+Shift+R).
 4) If cached, remove/re-add the view or open the board in a fresh tab.
 
+Live test checklist (Board View)
+- Authorize if prompted (one-time).
+- Targets: Items + Subitems on, Docs optional.
+- Preview: confirm results load, paging works, and “Show only changed” is correct.
+- Apply: confirm typing APPLY is required and run_id appears in the response.
+- Audit export: open `/api/audit?run_id=...` and confirm rows exist.
+
 API examples
 Preview
 ```sh
@@ -87,9 +94,15 @@ Troubleshooting
 - Missing accountId/boardId: reopen inside a board view.
 - Preview empty: check filters, targets, or case sensitivity.
 - Docs warning: docs API calls are best-effort; add doc IDs manually or disable docs target.
+- Apply failed: open Diagnostics, copy Request ID, and check server logs for the same requestId.
+- 429/5xx errors: apply uses retries with backoff, but large runs may need lower max changes.
 
 Assumptions (no web research)
 - Docs queries/mutations use `docs(ids: ...)` and `update_doc_block` with `content`.
 - Doc column values contain `doc_id`/`docId` in the raw `value` payload.
 - Subitem column values are safe to update via `change_multiple_column_values` with subitem board id.
 - Items pagination relies on `items_page` cursors; preview pagination is per items page.
+
+Known limitations
+- Docs support is best-effort and may skip blocks if the GraphQL schema differs.
+- Preview paging is items-page based and does not dedupe if the board changes mid-run.

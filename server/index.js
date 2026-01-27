@@ -18,8 +18,14 @@ const secretFingerprint = (value) => {
   return crypto.createHash('sha256').update(value).digest('hex').slice(0, 8);
 };
 
+app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex');
+  res.setHeader('x-request-id', req.requestId);
+  next();
+});
+
 app.use((req, _res, next) => {
-  console.log(`[REQ] ${req.method} ${req.path}`);
+  console.log(`[REQ] ${req.method} ${req.path} requestId=${req.requestId}`);
   next();
 });
 
@@ -135,6 +141,7 @@ const insertAudit = db.prepare(
 const rateWindowMs = 60_000;
 const rateMax = 120;
 const rateBuckets = new Map();
+const MAX_UPDATES_PER_RUN = Number(process.env.MAX_UPDATES_PER_RUN) || 250;
 const rateLimit = (req, res, next) => {
   const key = req.ip || 'unknown';
   const now = Date.now();
@@ -484,6 +491,8 @@ const normalizeArray = (value) => {
   return [];
 };
 
+const sortArray = (values) => [...values].sort();
+
 const normalizeTargets = (targets) => ({
   items: targets?.items !== false,
   subitems: Boolean(targets?.subitems),
@@ -496,13 +505,13 @@ const normalizeRules = (rules) => ({
 });
 
 const normalizeFilters = (filters) => ({
-  includeColumnIds: normalizeArray(filters?.includeColumnIds),
-  excludeColumnIds: normalizeArray(filters?.excludeColumnIds),
-  includeGroupIds: normalizeArray(filters?.includeGroupIds),
-  excludeGroupIds: normalizeArray(filters?.excludeGroupIds),
-  includeNameContains: normalizeArray(filters?.includeNameContains),
-  excludeNameContains: normalizeArray(filters?.excludeNameContains),
-  docIds: normalizeArray(filters?.docIds)
+  includeColumnIds: sortArray(normalizeArray(filters?.includeColumnIds)),
+  excludeColumnIds: sortArray(normalizeArray(filters?.excludeColumnIds)),
+  includeGroupIds: sortArray(normalizeArray(filters?.includeGroupIds)),
+  excludeGroupIds: sortArray(normalizeArray(filters?.excludeGroupIds)),
+  includeNameContains: sortArray(normalizeArray(filters?.includeNameContains)),
+  excludeNameContains: sortArray(normalizeArray(filters?.excludeNameContains)),
+  docIds: sortArray(normalizeArray(filters?.docIds))
 });
 
 const normalizeLimit = (limit) => ({
@@ -513,6 +522,21 @@ const normalizePagination = (pagination) => ({
   cursor: pagination?.cursor ? String(pagination.cursor) : null,
   pageSize: pagination?.pageSize ? Math.min(Math.max(Number(pagination.pageSize) || 0, 1), 500) : null
 });
+
+const buildRunId = ({ accountId, boardId, find, replace, targets, rules, filters, limit }) => {
+  const payload = {
+    accountId: String(accountId || ''),
+    boardId: String(boardId || ''),
+    find: String(find || ''),
+    replace: String(replace || ''),
+    targets,
+    rules,
+    filters,
+    limit
+  };
+  const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  return hash.slice(0, 12);
+};
 
 const applyNameFilters = (name, includeList, excludeList) => {
   const safeName = String(name || '');
@@ -529,6 +553,39 @@ const applyNameFilters = (name, includeList, excludeList) => {
 };
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const shouldRetry = (err) => {
+  const status = err?.response?.status;
+  return status === 429 || status >= 500;
+};
+
+const withRetry = async (fn, { retries = 3, baseDelay = 250 } = {}) => {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err) {
+      attempt += 1;
+      if (!shouldRetry(err) || attempt > retries) throw err;
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      await sleep(delay);
+    }
+  }
+};
+
+const runWithConcurrency = async (items, worker, concurrency = 3) => {
+  let index = 0;
+  const results = [];
+  const runners = new Array(concurrency).fill(null).map(async () => {
+    while (index < items.length) {
+      const currentIndex = index;
+      index += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+};
 
 const fetchBoardColumns = async (token, boardIdValue) => {
   const columnsQuery = `
@@ -713,6 +770,21 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
   const boardIdValue = String(boardId);
   const findText = find;
   const replaceText = typeof replace === 'string' ? replace : '';
+  const effectiveMax = limit.maxChanges ? Math.min(limit.maxChanges, MAX_UPDATES_PER_RUN) : MAX_UPDATES_PER_RUN;
+  const runId = buildRunId({
+    accountId,
+    boardId: boardIdValue,
+    find: findText,
+    replace: replaceText,
+    targets,
+    rules,
+    filters,
+    limit: { maxChanges: effectiveMax }
+  });
+  const incomingRunId = req.body?.runId || req.body?.run_id;
+  if (incomingRunId && incomingRunId !== runId) {
+    return res.status(400).json({ ok: false, error: 'RUN_ID_MISMATCH', requestId: req.requestId, runId });
+  }
   const matcher = buildMatcher(findText, replaceText, rules);
   const pageSize = pagination.pageSize || 200;
 
@@ -724,7 +796,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
     const columnIdsForQuery = Array.from(new Set([...eligibleIds, ...docColumnIds]));
 
     if (eligibleIds.length === 0 && !targets.docs) {
-      return res.json({ totalMatches: 0, totalItems: 0, rows: [] });
+      return res.json({ requestId: req.requestId, runId, totalMatches: 0, totalItems: 0, rows: [] });
     }
 
     const rows = [];
@@ -775,7 +847,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
               before: truncateSnippet(text),
               after: truncateSnippet(matcher.replace(text))
             });
-            if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+            if (effectiveMax && totalMatches >= effectiveMax) {
               limitReached = true;
               break;
             }
@@ -809,7 +881,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
                 after: truncateSnippet(matcher.replace(text)),
                 subitemBoardId: subitem?.board?.id || null
               });
-              if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+              if (effectiveMax && totalMatches >= effectiveMax) {
                 limitReached = true;
                 break;
               }
@@ -824,7 +896,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
       if (limitReached || usePaging) break;
     } while (cursor);
 
-    if (targets.docs && docIds.size > 0) {
+    if (targets.docs && docIds.size > 0 && !(effectiveMax && totalMatches >= effectiveMax)) {
       try {
         for (const docId of docIds) {
           const { docName, blocks } = await fetchDocBlocks({ token, docId });
@@ -843,7 +915,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
               before: truncateSnippet(text),
               after: truncateSnippet(matcher.replace(text))
             });
-            if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+            if (effectiveMax && totalMatches >= effectiveMax) {
               limitReached = true;
               break;
             }
@@ -855,8 +927,10 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
       }
     }
 
-    console.log(`Preview: board ${boardIdValue}, matches ${totalMatches}, items ${itemIds.size}`);
+    console.log(`[preview] requestId=${req.requestId} runId=${runId} board=${boardIdValue} matches=${totalMatches} items=${itemIds.size}`);
     return res.json({
+      requestId: req.requestId,
+      runId,
       totalMatches,
       totalItems: itemIds.size,
       rows,
@@ -865,7 +939,7 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
       warnings
     });
   } catch (err) {
-    console.error('Preview failed', err.response?.status || err.message);
+    console.error(`[preview] failed requestId=${req.requestId} status=${err.response?.status || ''} message=${err.message || ''}`);
     return res.status(500).send('Preview failed');
   }
 });
@@ -898,8 +972,22 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
   const boardIdValue = String(boardId);
   const findText = find;
   const replaceText = typeof replace === 'string' ? replace : '';
+  const effectiveMax = limit.maxChanges ? Math.min(limit.maxChanges, MAX_UPDATES_PER_RUN) : MAX_UPDATES_PER_RUN;
+  const runId = buildRunId({
+    accountId,
+    boardId: boardIdValue,
+    find: findText,
+    replace: replaceText,
+    targets,
+    rules,
+    filters,
+    limit: { maxChanges: effectiveMax }
+  });
+  const incomingRunId = req.body?.runId || req.body?.run_id;
+  if (incomingRunId && incomingRunId !== runId) {
+    return res.status(400).json({ ok: false, error: 'RUN_ID_MISMATCH', requestId: req.requestId, runId });
+  }
   const matcher = buildMatcher(findText, replaceText, rules);
-  const runId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex');
 
   try {
     const { eligibleColumns, docColumns, columnTitleById } = await fetchBoardColumns(token, boardIdValue);
@@ -953,7 +1041,7 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
               before: text,
               after: matcher.replace(text)
             });
-            if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+            if (effectiveMax && totalMatches >= effectiveMax) {
               limitReached = true;
               break;
             }
@@ -988,7 +1076,7 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
                 after: matcher.replace(text),
                 subitemBoardId: subitem?.board?.id || null
               });
-              if (limit.maxChanges && totalMatches >= limit.maxChanges) {
+              if (effectiveMax && totalMatches >= effectiveMax) {
                 limitReached = true;
                 break;
               }
@@ -1036,16 +1124,17 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
       }
     `;
 
-    for (const [key, payload] of updatesByTarget.entries()) {
+    const updateTasks = Array.from(updatesByTarget.entries()).map(([key, payload]) => ({ key, payload }));
+    await runWithConcurrency(updateTasks, async ({ key, payload }) => {
       try {
-        await axios.post('https://api.monday.com/v2', {
+        await withRetry(() => axios.post('https://api.monday.com/v2', {
           query: mutation,
           variables: {
             boardId: payload.boardId,
             itemId: payload.itemId,
             columnValues: payload.columnValues
           }
-        }, { headers: { Authorization: token } });
+        }, { headers: { Authorization: token } }));
         updated += 1;
         const changeList = changesByTarget.get(key) || [];
         changeList.forEach(change => {
@@ -1060,9 +1149,9 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
         });
       }
       await sleep(120);
-    }
+    }, 3);
 
-    if (targets.docs && docIds.size > 0 && !(limit.maxChanges && totalMatches >= limit.maxChanges)) {
+    if (targets.docs && docIds.size > 0 && !(effectiveMax && totalMatches >= effectiveMax)) {
       for (const docId of docIds) {
         try {
           const { blocks } = await fetchDocBlocks({ token, docId });
@@ -1070,22 +1159,24 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
             const text = extractDocBlockText(block);
             if (!matcher.includes(text)) continue;
             const after = matcher.replace(text);
-            await updateDocBlock({ token, blockId: block.id, content: after });
+            await withRetry(() => updateDocBlock({ token, blockId: block.id, content: after }));
             updated += 1;
             insertAudit.run(runId, accountId, boardIdValue, 'doc_block', docId, block.id, text, after, 'success', null, Date.now());
             totalMatches += 1;
-            if (limit.maxChanges && totalMatches >= limit.maxChanges) break;
+            if (effectiveMax && totalMatches >= effectiveMax) break;
           }
         } catch (e) {
           errors.push({ docId, message: e?.message || 'Doc update failed' });
           insertAudit.run(runId, accountId, boardIdValue, 'doc_block', docId, null, null, null, 'failed', String(e?.message || 'Doc update failed'), Date.now());
         }
-        if (limit.maxChanges && totalMatches >= limit.maxChanges) break;
+        if (effectiveMax && totalMatches >= effectiveMax) break;
       }
     }
 
+    console.log(`[apply] requestId=${req.requestId} runId=${runId} updated=${updated} skipped=${skipped}`);
     return res.json({
       ok: true,
+      requestId: req.requestId,
       runId,
       updated,
       skipped,
@@ -1093,7 +1184,7 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
       limitReached
     });
   } catch (err) {
-    console.error('Apply failed', err.response?.status || err.message);
+    console.error(`[apply] failed requestId=${req.requestId} status=${err.response?.status || ''} message=${err.message || ''}`);
     return res.status(500).send('Apply failed');
   }
 });

@@ -9,40 +9,56 @@ const TargetsRulesCard = ({
   setFilters,
   limit,
   setLimit
-}) => (
-  <section className="card surface">
-    <div className="section-header">
-      <h2>Step 2 · Targets &amp; rules</h2>
-      <span className="pill">Safe</span>
-    </div>
-    <div className="grid-2">
-      <div className="field">
-        <span className="field__label">Targets</span>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={targets.items}
-            onChange={(e) => setTargets({ ...targets, items: e.target.checked })}
-          />
-          <span>Items</span>
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={targets.subitems}
-            onChange={(e) => setTargets({ ...targets, subitems: e.target.checked })}
-          />
-          <span>Subitems</span>
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={targets.docs}
-            onChange={(e) => setTargets({ ...targets, docs: e.target.checked })}
-          />
-          <span>Docs (WorkDocs)</span>
-        </label>
+}) => {
+  const activeTargets = [
+    targets.items && { label: 'Items', tone: 'pill-green' },
+    targets.subitems && { label: 'Subitems', tone: 'pill-blue' },
+    targets.docs && { label: 'Docs', tone: 'pill-purple' }
+  ].filter(Boolean);
+
+  return (
+    <section className="card surface">
+      <div className="section-header">
+        <h2>Step 2 · Targets &amp; rules</h2>
+        <span className="pill">Safe</span>
       </div>
+      <div className="targets-active">
+        <span className="muted">Active:</span>
+        {activeTargets.length === 0 && <span className="pill pill-red">None</span>}
+        {activeTargets.map((target) => (
+          <span key={target.label} className={`pill ${target.tone}`}>
+            {target.label}
+          </span>
+        ))}
+      </div>
+      <div className="grid-2">
+        <div className="field">
+          <span className="field__label">Targets</span>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={targets.items}
+              onChange={(e) => setTargets({ ...targets, items: e.target.checked })}
+            />
+            <span>Items</span>
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={targets.subitems}
+              onChange={(e) => setTargets({ ...targets, subitems: e.target.checked })}
+            />
+            <span>Subitems</span>
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={targets.docs}
+              onChange={(e) => setTargets({ ...targets, docs: e.target.checked })}
+            />
+            <span>Docs (WorkDocs)</span>
+          </label>
+        </div>
       <div className="field">
         <span className="field__label">Rules</span>
         <label className="toggle">
@@ -143,6 +159,7 @@ const TargetsRulesCard = ({
       </label>
     </div>
   </section>
-);
+  );
+};
 
 export default TargetsRulesCard;
