@@ -2,9 +2,9 @@ import React from 'react';
 
 const Stepper = ({ currentStep, connected }) => {
   const steps = [
-    { id: 1, label: 'Scope', status: connected ? 'Connected' : 'Waiting' },
-    { id: 2, label: 'Targets & rules' },
-    { id: 3, label: 'Find & replace' },
+    { id: 1, label: 'Where to look', status: connected ? 'Connected' : 'Waiting' },
+    { id: 2, label: 'What to change' },
+    { id: 3, label: 'Safety' },
     { id: 4, label: 'Preview & apply' }
   ];
 

@@ -1,10 +1,12 @@
 import React from 'react';
 
-const FindReplaceForm = ({
+const WhatToChangeCard = ({
   find,
   replace,
   setFind,
   setReplace,
+  rules,
+  setRules,
   onPreview,
   previewDisabled,
   previewLoading,
@@ -12,7 +14,7 @@ const FindReplaceForm = ({
 }) => (
   <section className="card surface">
     <div className="section-header">
-      <h2>Step 3 · Find &amp; replace</h2>
+      <h2>Step 2 · What to change</h2>
       <span className="pill">Safe</span>
     </div>
     <div className="form-grid">
@@ -36,7 +38,7 @@ const FindReplaceForm = ({
           className="input"
           value={replace}
           onChange={(e) => setReplace(e.target.value)}
-          placeholder="Replacement text (optional)"
+          placeholder="Leave blank to remove text"
           onKeyDown={(event) => {
             if (event.key !== 'Enter' || !canPreview) return;
             event.preventDefault();
@@ -44,6 +46,24 @@ const FindReplaceForm = ({
           }}
         />
       </label>
+      <div className="toggle-row">
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={rules.caseSensitive}
+            onChange={(e) => setRules({ ...rules, caseSensitive: e.target.checked })}
+          />
+          <span>Match case</span>
+        </label>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={rules.wholeWord}
+            onChange={(e) => setRules({ ...rules, wholeWord: e.target.checked })}
+          />
+          <span>Whole word only</span>
+        </label>
+      </div>
       <div className="form-actions">
         <button className="btn btn-primary" type="button" onClick={onPreview} disabled={previewDisabled}>
           {previewLoading ? 'Previewing…' : 'Preview changes'}
@@ -54,4 +74,4 @@ const FindReplaceForm = ({
   </section>
 );
 
-export default FindReplaceForm;
+export default WhatToChangeCard;

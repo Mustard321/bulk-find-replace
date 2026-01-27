@@ -3,10 +3,10 @@ import mondaySdk from 'monday-sdk-js';
 import './App.css';
 import TopBar from './components/TopBar';
 import Stepper from './components/Stepper';
-import ScopeCard from './components/ScopeCard';
 import ScopeSummaryCard from './components/ScopeSummaryCard';
-import TargetsRulesCard from './components/TargetsRulesCard';
-import FindReplaceForm from './components/FindReplaceForm';
+import WhereToLookCard from './components/WhereToLookCard';
+import WhatToChangeCard from './components/WhatToChangeCard';
+import SafetyCard from './components/SafetyCard';
 import PreviewPanel from './components/PreviewPanel';
 import ConfirmModal from './components/ConfirmModal';
 import Toast from './components/Toast';
@@ -25,9 +25,9 @@ const InlineNotice = ({ tone = 'neutral', children }) => (
   </div>
 );
 
-const parseList = (value) =>
-  value
-    .split(',')
+const parseFreeformList = (value) =>
+  String(value || '')
+    .split(/[\n,]+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
 
@@ -92,16 +92,17 @@ export default function App() {
 
   const [targets, setTargets] = useState({ items: true, subitems: false, docs: false });
   const [rules, setRules] = useState({ caseSensitive: false, wholeWord: false });
-  const [filters, setFilters] = useState({
-    includeColumnIds: '',
-    excludeColumnIds: '',
-    includeGroupIds: '',
-    excludeGroupIds: '',
-    includeNameContains: '',
-    excludeNameContains: '',
-    docIds: ''
-  });
-  const [limit, setLimit] = useState({ maxChanges: '' });
+  const [columnScope, setColumnScope] = useState('all');
+  const [includeColumnIds, setIncludeColumnIds] = useState([]);
+  const [excludeColumnIds, setExcludeColumnIds] = useState([]);
+  const [includeGroupIds, setIncludeGroupIds] = useState([]);
+  const [includeNameContains, setIncludeNameContains] = useState('');
+  const [excludeNameContains, setExcludeNameContains] = useState('');
+  const [docIdsText, setDocIdsText] = useState('');
+  const [limit, setLimit] = useState({ maxChanges: 250 });
+  const [boardMeta, setBoardMeta] = useState({ columns: [], groups: [] });
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [metaError, setMetaError] = useState('');
 
   const authPollRef = useRef(null);
 
@@ -213,6 +214,42 @@ export default function App() {
     return () => window.removeEventListener('message', handler);
   }, [API_BASE]);
 
+  useEffect(() => {
+    let mounted = true;
+    if (!boardId) return () => {};
+    setMetaLoading(true);
+    setMetaError('');
+    monday
+      .api(
+        `query($id: ID!) {
+          boards(ids: [$id]) {
+            columns { id title type }
+            groups { id title }
+          }
+        }`,
+        { variables: { id: boardId } }
+      )
+      .then((res) => {
+        if (!mounted) return;
+        const board = res?.data?.boards?.[0];
+        setBoardMeta({
+          columns: board?.columns || [],
+          groups: board?.groups || []
+        });
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setMetaError(String(err?.message || err));
+        setBoardMeta({ columns: [], groups: [] });
+      })
+      .finally(() => {
+        if (mounted) setMetaLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [boardId, monday]);
+
   const startAuthPoll = (accountId) => {
     if (authPollRef.current) clearInterval(authPollRef.current);
     let attempts = 0;
@@ -266,6 +303,18 @@ export default function App() {
   const hasAccountId = Boolean(accountId);
   const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
 
+  const textColumns = useMemo(
+    () =>
+      (boardMeta.columns || [])
+        .filter((col) => col.type === 'text' || col.type === 'long_text')
+        .map((col) => ({ id: col.id, label: col.title })),
+    [boardMeta.columns]
+  );
+  const groupOptions = useMemo(
+    () => (boardMeta.groups || []).map((group) => ({ id: group.id, label: group.title })),
+    [boardMeta.groups]
+  );
+
   const handleReconnect = () => {
     if (!hasAccountId) {
       setError('Missing accountId.');
@@ -295,13 +344,13 @@ export default function App() {
     targets,
     rules,
     filters: {
-      includeColumnIds: parseList(filters.includeColumnIds),
-      excludeColumnIds: parseList(filters.excludeColumnIds),
-      includeGroupIds: parseList(filters.includeGroupIds),
-      excludeGroupIds: parseList(filters.excludeGroupIds),
-      includeNameContains: parseList(filters.includeNameContains),
-      excludeNameContains: parseList(filters.excludeNameContains),
-      docIds: parseList(filters.docIds)
+      includeColumnIds: columnScope === 'custom' ? includeColumnIds : [],
+      excludeColumnIds: excludeColumnIds,
+      includeGroupIds: includeGroupIds,
+      excludeGroupIds: [],
+      includeNameContains: includeNameContains ? [includeNameContains] : [],
+      excludeNameContains: excludeNameContains ? [excludeNameContains] : [],
+      docIds: parseFreeformList(docIdsText)
     },
     limit: {
       maxChanges: limit.maxChanges ? Number(limit.maxChanges) : undefined
@@ -529,7 +578,9 @@ export default function App() {
 
   const findTrimmed = find.trim();
   const targetsSelected = targets.items || targets.subitems || targets.docs;
-  const canPreview = Boolean(boardId) && findTrimmed.length >= 2 && targetsSelected && !previewLoading && !loading && hasAccountId;
+  const hasFieldSelection = columnScope !== 'custom' || includeColumnIds.length > 0;
+  const canPreview =
+    Boolean(boardId) && findTrimmed.length >= 2 && targetsSelected && hasFieldSelection && !previewLoading && !loading && hasAccountId;
   const previewDisabled = !canPreview;
   const showError = Boolean(error) && !(authRequired && error.startsWith(AUTH_EXPIRED_MESSAGE));
   const needsRemoveConfirm = replace.length === 0 && findTrimmed.length > 0;
@@ -585,27 +636,20 @@ export default function App() {
     targets.subitems && 'Subitems',
     targets.docs && 'Docs'
   ].filter(Boolean);
-  const includeColumnIds = parseList(filters.includeColumnIds);
-  const excludeColumnIds = parseList(filters.excludeColumnIds);
-  const includeGroupIds = parseList(filters.includeGroupIds);
-  const excludeGroupIds = parseList(filters.excludeGroupIds);
-  const includeNameContains = parseList(filters.includeNameContains);
-  const excludeNameContains = parseList(filters.excludeNameContains);
-  const docIds = parseList(filters.docIds);
+  const docIds = parseFreeformList(docIdsText);
   const filtersActive =
-    includeColumnIds.length > 0 ||
+    (columnScope === 'custom' && includeColumnIds.length > 0) ||
     excludeColumnIds.length > 0 ||
     includeGroupIds.length > 0 ||
-    excludeGroupIds.length > 0 ||
-    includeNameContains.length > 0 ||
-    excludeNameContains.length > 0 ||
+    Boolean(includeNameContains) ||
+    Boolean(excludeNameContains) ||
     docIds.length > 0;
   const columnRule =
-    includeColumnIds.length > 0
-      ? `Custom include (${includeColumnIds.length})`
+    columnScope === 'custom'
+      ? `Selected fields (${includeColumnIds.length})`
       : excludeColumnIds.length > 0
-        ? `Text + long text, excluding ${excludeColumnIds.length}`
-        : 'Text + long text (default)';
+        ? `All text fields (excluding ${excludeColumnIds.length})`
+        : 'All text fields';
 
   const DiagnosticsPanel = () => (
     <div className="diagnostics surface-2">
@@ -742,32 +786,54 @@ export default function App() {
           filtersActive={filtersActive}
         />
 
-        <ScopeCard boardId={boardId} ctxLoaded={!loading} />
-
-        <TargetsRulesCard
+        <WhereToLookCard
           targets={targets}
           setTargets={setTargets}
-          rules={rules}
-          setRules={setRules}
-          filters={filters}
-          setFilters={setFilters}
-          limit={limit}
-          setLimit={setLimit}
+          columnScope={columnScope}
+          setColumnScope={setColumnScope}
+          textColumns={textColumns}
+          groupOptions={groupOptions}
+          includeColumnIds={includeColumnIds}
+          setIncludeColumnIds={setIncludeColumnIds}
+          includeGroupIds={includeGroupIds}
+          setIncludeGroupIds={setIncludeGroupIds}
+          includeNameContains={includeNameContains}
+          setIncludeNameContains={setIncludeNameContains}
+          excludeNameContains={excludeNameContains}
+          setExcludeNameContains={setExcludeNameContains}
+          excludeColumnIds={excludeColumnIds}
+          setExcludeColumnIds={setExcludeColumnIds}
+          docIdsText={docIdsText}
+          setDocIdsText={setDocIdsText}
+          metaLoading={metaLoading}
+          metaError={metaError}
         />
 
-        <FindReplaceForm
+        <WhatToChangeCard
           find={find}
           replace={replace}
           setFind={setFind}
           setReplace={setReplace}
+          rules={rules}
+          setRules={setRules}
           onPreview={() => runPreview({ cursor: cursorStack[cursorIndex], reset: true })}
           previewDisabled={previewDisabled}
           previewLoading={previewLoading}
           canPreview={canPreview}
         />
 
+        <SafetyCard
+          limit={limit}
+          setLimit={setLimit}
+          dryRun={dryRun}
+          setDryRunPreference={setDryRunPreference}
+        />
+
         {!targetsSelected && (
           <InlineNotice tone="neutral">Select at least one target to preview.</InlineNotice>
+        )}
+        {targetsSelected && columnScope === 'custom' && includeColumnIds.length === 0 && (
+          <InlineNotice tone="neutral">Select at least one field or switch to all text fields.</InlineNotice>
         )}
 
         <PreviewPanel
@@ -843,14 +909,6 @@ export default function App() {
               </a>
             )}
           </div>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={dryRun}
-              onChange={(e) => setDryRunPreference(e.target.checked)}
-            />
-            <span>Dry run (no changes)</span>
-          </label>
           <button
             className="btn btn-secondary"
             type="button"

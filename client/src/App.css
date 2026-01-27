@@ -309,6 +309,54 @@ button {
   height: 16px;
 }
 
+.toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.multi-select {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.multi-select__list {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  max-height: 220px;
+  overflow: auto;
+}
+
+.advanced {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.advanced__summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.advanced__body {
+  margin-top: 12px;
+  display: grid;
+  gap: 12px;
+}
+
+.textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
 .diff-list {
   display: grid;
   gap: 14px;
