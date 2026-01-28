@@ -97,6 +97,7 @@ export default function App() {
   const [lastRequestStatus, setLastRequestStatus] = useState('—');
   const applyTimerRef = useRef(null);
   const lastFailedActionRef = useRef(null);
+  const authRetryRef = useRef(false);
 
   const [targets, setTargets] = useState({ items: true, subitems: false, docs: false });
   const [rules, setRules] = useState({ caseSensitive: false, wholeWord: false });
@@ -219,29 +220,91 @@ export default function App() {
     }
   }, [authIssue]);
 
-  useEffect(() => {
-    const handler = (e) => {
-      if (e?.data?.type !== 'BFR_OAUTH_OK') return;
-      const accountId = String(e.data.accountId || '');
-      if (accountId) setOauthAccountId(accountId);
-      if (!accountId) return;
-      fetch(`${API_BASE}/api/auth/status?accountId=${encodeURIComponent(accountId)}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
+  const loadBoardMeta = async () => {
+    if (!boardId || !accountId || !hasApiBase) return;
+    if (typeof window === 'undefined') return;
+    const cacheStore = window[META_CACHE_KEY] || {};
+    if (cacheStore[boardId]) {
+      setBoardMeta(cacheStore[boardId]);
+      setMetaLoading(false);
+      return;
+    }
+    setMetaLoading(true);
+    setMetaError('');
+    const query = `query($id: ID!) {
+      boards(ids: [$id]) {
+        columns { id title type }
+        groups { id title }
+      }
+    }`;
+    try {
+      const result = await apiRequest({
+        path: '/api/graphql',
+        body: {
+          accountId: String(accountId),
+          query,
+          variables: { id: boardId }
+        }
+      });
+      if (!result) return;
+      if (!result.response.ok) {
+        if (!authIssue) setMetaError('Unable to load fields or groups.');
+        return;
+      }
+      let data;
+      try {
+        data = result.text ? JSON.parse(result.text) : null;
+      } catch {
+        data = null;
+      }
+      const board = data?.data?.boards?.[0];
+      const nextMeta = {
+        columns: board?.columns || [],
+        groups: board?.groups || []
+      };
+      setBoardMeta(nextMeta);
+      window[META_CACHE_KEY] = { ...cacheStore, [boardId]: nextMeta };
+    } catch (err) {
+      setMetaError(String(err?.message || err));
+      setBoardMeta({ columns: [], groups: [] });
+    } finally {
+      setMetaLoading(false);
+    }
+  };
+
+  const handleAuthSuccess = (incomingAccountId) => {
+    const nextAccountId = String(incomingAccountId || '');
+    if (nextAccountId) setOauthAccountId(nextAccountId);
+    if (!nextAccountId) return;
+    fetch(`${API_BASE}/api/auth/status?accountId=${encodeURIComponent(nextAccountId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
         if (d?.connected || d?.authorized) {
           setAuthIssue(null);
+          authRetryRef.current = false;
           if (typeof window !== 'undefined') {
             const cacheStore = window[META_CACHE_KEY] || {};
             delete cacheStore[boardId];
             window[META_CACHE_KEY] = cacheStore;
           }
-          retryLastAction();
+          loadBoardMeta();
+          if (!authRetryRef.current) {
+            authRetryRef.current = true;
+            retryLastAction();
+          }
         } else if (d?.code === 'AUTH_NOT_CONNECTED') {
           setAuthIssue('oauth');
           setError(OAUTH_REQUIRED_MESSAGE);
         }
-        })
-        .catch(() => {});
+      })
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (!e?.data?.type) return;
+      if (e.data.type !== 'BFR_OAUTH_OK' && e.data.type !== 'mustard_oauth_success') return;
+      handleAuthSuccess(e.data.accountId);
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
@@ -337,7 +400,10 @@ export default function App() {
       setError('Authorization URL is unavailable. Check VITE_API_BASE_URL.');
       return;
     }
-    window.location.href = authorizeUrl;
+    const popup = window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
+    if (!popup) {
+      window.location.href = authorizeUrl;
+    }
     startAuthPoll(accountId);
   };
 
@@ -382,6 +448,7 @@ export default function App() {
       if (result?.response?.status === 401) {
         const code = parseAuthCode(result.text);
         if (code === 'AUTH_NOT_CONNECTED' || code === 'AUTH_OAUTH_FAILED') {
+          setMetaError('');
           setAuthIssue('oauth');
           setError(OAUTH_REQUIRED_MESSAGE);
         } else if (code === 'AUTH_SESSION_INVALID') {
@@ -398,63 +465,19 @@ export default function App() {
     return result;
   };
 
+  const handleRetryMeta = () => {
+    if (typeof window !== 'undefined') {
+      const cacheStore = window[META_CACHE_KEY] || {};
+      delete cacheStore[boardId];
+      window[META_CACHE_KEY] = cacheStore;
+    }
+    setMetaError('');
+    loadBoardMeta();
+  };
   useEffect(() => {
     let mounted = true;
     if (!boardId || !accountId) return () => {};
-    if (!hasApiBase) return () => {};
-    if (typeof window === 'undefined') return () => {};
-    const cacheStore = window[META_CACHE_KEY] || {};
-    if (cacheStore[boardId]) {
-      setBoardMeta(cacheStore[boardId]);
-      setMetaLoading(false);
-      return () => {};
-    }
-    setMetaLoading(true);
-    setMetaError('');
-    const query = `query($id: ID!) {
-      boards(ids: [$id]) {
-        columns { id title type }
-        groups { id title }
-      }
-    }`;
-    apiRequest({
-      path: '/api/graphql',
-      body: {
-        accountId: String(accountId),
-        query,
-        variables: { id: boardId }
-      }
-    })
-      .then((result) => {
-        if (!mounted || !result) return;
-        if (!result.response.ok) {
-          if (!authIssue) {
-            setMetaError('Unable to load fields or groups.');
-          }
-          return;
-        }
-        let data;
-        try {
-          data = result.text ? JSON.parse(result.text) : null;
-        } catch {
-          data = null;
-        }
-        const board = data?.data?.boards?.[0];
-        const nextMeta = {
-          columns: board?.columns || [],
-          groups: board?.groups || []
-        };
-        setBoardMeta(nextMeta);
-        window[META_CACHE_KEY] = { ...cacheStore, [boardId]: nextMeta };
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setMetaError(String(err?.message || err));
-        setBoardMeta({ columns: [], groups: [] });
-      })
-      .finally(() => {
-        if (mounted) setMetaLoading(false);
-      });
+    loadBoardMeta();
     return () => {
       mounted = false;
     };
@@ -940,6 +963,7 @@ export default function App() {
           setDocIdsText={setDocIdsText}
           metaLoading={metaLoading}
           metaError={metaError}
+          onRetryMeta={handleRetryMeta}
         />
 
         <WhatToChangeCard

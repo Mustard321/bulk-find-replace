@@ -185,13 +185,16 @@ const buildAuthDebug = ({ authHeader, token, startsWithBearer }) => {
 
 const verifyMondayJwt = (token) => {
   const signing = (process.env.MONDAY_SIGNING_SECRET || '').trim();
-  if (!signing) {
+  const fallback = (process.env.MONDAY_CLIENT_SECRET || '').trim();
+  const secret = signing || fallback;
+  const label = signing ? 'SIGNING' : 'CLIENT_FALLBACK';
+  if (!secret) {
     const err = new Error('Signing secret missing');
     err.name = 'SIGNING_SECRET_MISSING';
     throw err;
   }
-  const decoded = jwt.verify(token, signing, { algorithms: ['HS256'] });
-  return { decoded, verifiedWith: 'SIGNING' };
+  const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
+  return { decoded, verifiedWith: label };
 };
 
 const normalizeAccountId = (value) => {
@@ -263,8 +266,14 @@ const mondayAuth = (req, res, next) => {
     return next();
   } catch (e) {
     const signingLen = (process.env.MONDAY_SIGNING_SECRET || '').trim().length;
+    const clientLen = (process.env.MONDAY_CLIENT_SECRET || '').trim().length;
+    const reason = e?.name === 'TokenExpiredError'
+      ? 'EXPIRED'
+      : e?.name === 'SIGNING_SECRET_MISSING'
+        ? 'MISSING'
+        : 'INVALID_SIGNATURE';
     console.warn(
-      `[mondayAuth] verify failed name=${e?.name || 'Error'} message=${e?.message || ''} tokenLength=${debug.tokenLength} hasDots=${debug.hasDots} startsWithBearer=${debug.startsWithBearer} signingLen=${signingLen}`
+      `[mondayAuth] verify failed name=${e?.name || 'Error'} reason=${reason} tokenLength=${debug.tokenLength} hasDots=${debug.hasDots} startsWithBearer=${debug.startsWithBearer} signingLen=${signingLen} clientLen=${clientLen}`
     );
     return res.status(401).json({
       error: 'Unauthorized',
@@ -418,14 +427,24 @@ app.get('/auth/callback', async (req, res) => {
     console.log(`[OAUTH] token ok account_id=${tokenAccountId} stored=true source=${source}`);
     res.send(`<!doctype html>
 <html>
-  <body>Authorized. You can close this tab.
+  <body>
+    Authorized. You can close this tab.
     <script>
-      try {
-        if (window.opener) {
-          window.opener.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
-        }
-      } catch (e) {}
-      try { window.close(); } catch (e) {}
+      (function () {
+        try {
+          if (window.opener) {
+            window.opener.postMessage({ type: "mustard_oauth_success", accountId: "${tokenAccountId}" }, "*");
+            window.opener.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
+          }
+        } catch (e) {}
+        try {
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage({ type: "mustard_oauth_success", accountId: "${tokenAccountId}" }, "*");
+            window.parent.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
+          }
+        } catch (e) {}
+        try { window.close(); } catch (e) {}
+      })();
     </script>
   </body>
 </html>`);

@@ -38,7 +38,8 @@ const WhereToLookCard = ({
   docIdsText,
   setDocIdsText,
   metaLoading,
-  metaError
+  metaError,
+  onRetryMeta
 }) => {
   const selectedFieldNames = textColumns
     .filter((col) => includeColumnIds.includes(col.id))
@@ -174,7 +175,10 @@ const WhereToLookCard = ({
 
       {metaError && (
         <div className="notice notice--error surface-2">
-          We couldn’t load fields or groups. You can still run previews on all text fields.
+          <div>We couldn’t load fields or groups.</div>
+          <button className="btn btn-secondary" type="button" onClick={onRetryMeta}>
+            Retry loading fields
+          </button>
         </div>
       )}
     </section>
