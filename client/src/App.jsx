@@ -10,6 +10,7 @@ import SafetyCard from './components/SafetyCard';
 import PreviewPanel from './components/PreviewPanel';
 import ConfirmModal from './components/ConfirmModal';
 import Toast from './components/Toast';
+import ErrorBoundary from './components/ErrorBoundary';
 import useDebouncedValue from './utils/useDebouncedValue';
 import { formatNumber } from './utils/formatters.jsx';
 
@@ -21,6 +22,7 @@ const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
 const DRY_RUN_KEY = 'mustard_bfr_dry_run';
 const META_CACHE_KEY = '__BFR_BOARD_META_CACHE';
 const RELOAD_ATTEMPT_KEY = 'bfr_reload_attempted';
+const VERCEL_URL = 'https://bulk-find-replace.vercel.app';
 
 const InlineNotice = ({ tone = 'neutral', children }) => (
   <div className={`notice notice--${tone} surface-2`} role={tone === 'error' ? 'alert' : 'status'}>
@@ -37,7 +39,7 @@ const parseFreeformList = (value) =>
 const formatRequestError = (message, requestId) =>
   requestId ? `${message} Request ID: ${requestId}.` : message;
 
-export default function App() {
+function AppContent() {
   const monday = useMemo(() => {
     if (window.__BFR_MONDAY) return window.__BFR_MONDAY;
     const sdk = window.mondaySdk ? window.mondaySdk() : mondaySdk();
@@ -46,7 +48,7 @@ export default function App() {
   }, []);
   const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
   const hasApiBase = Boolean(API_BASE);
-  const buildId = import.meta.env.VITE_COMMIT_SHA || import.meta.env.VITE_APP_VERSION || 'unknown';
+  const buildId = import.meta.env.VITE_GIT_SHA || import.meta.env.VITE_COMMIT_SHA || import.meta.env.VITE_APP_VERSION || 'unknown';
   const buildEnv = import.meta.env.PROD ? 'production' : import.meta.env.MODE || 'unknown';
 
   const [ctx, setCtx] = useState(null);
@@ -97,6 +99,7 @@ export default function App() {
   const [lastRequestStatus, setLastRequestStatus] = useState('—');
   const [popupBlocked, setPopupBlocked] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [ctxTimedOut, setCtxTimedOut] = useState(false);
   const applyTimerRef = useRef(null);
   const lastFailedActionRef = useRef(null);
   const authRetryRef = useRef(false);
@@ -188,6 +191,17 @@ export default function App() {
     };
   }, [monday]);
 
+  useEffect(() => {
+    if (ctx) {
+      setCtxTimedOut(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setCtxTimedOut(true);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [ctx]);
+
   useEffect(() => () => {
     if (authPollRef.current) clearInterval(authPollRef.current);
   }, []);
@@ -242,6 +256,7 @@ export default function App() {
       setMetaError('Waiting for Monday context…');
       return;
     }
+    if (authIssue === 'oauth') return;
     if (typeof window === 'undefined') return;
     const cacheStore = window[META_CACHE_KEY] || {};
     if (cacheStore[boardId]) {
@@ -252,6 +267,8 @@ export default function App() {
     setMetaLoading(true);
     setMetaError('');
     try {
+      const connected = await ensureConnected();
+      if (!connected) return;
       const res = await monday.api(
         `query($id: ID!) {
           boards(ids: [$id]) {
@@ -277,6 +294,34 @@ export default function App() {
       setBoardMeta({ columns: [], groups: [] });
     } finally {
       setMetaLoading(false);
+    }
+  };
+
+  const ensureConnected = async () => {
+    if (!accountId || !hasApiBase) return false;
+    try {
+      const r = await fetch(`${API_BASE}/api/auth/status?accountId=${encodeURIComponent(accountId)}`);
+      if (!r.ok) return false;
+      const d = await r.json();
+      if (d?.connected || d?.authorized) {
+        setAuthIssue(null);
+        return true;
+      }
+      const result = await apiRequest({
+        path: '/api/graphql',
+        body: {
+          accountId: String(accountId),
+          query: 'query { me { id } }',
+          variables: {}
+        }
+      });
+      if (result?.response?.ok) {
+        setAuthIssue(null);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
     }
   };
 
@@ -325,6 +370,26 @@ export default function App() {
       startAuthPoll(accountId);
     }
   }, [accountId]);
+
+  const handleRetryContext = () => {
+    setCtxTimedOut(false);
+    setLoading(true);
+    monday
+      .get('context')
+      .then((res) => {
+        const next = res?.data ?? res;
+        setCtxRaw(res);
+        setCtx(next);
+        setBoardId(next?.boardId ?? next?.board?.id ?? null);
+        const nextAccountId = next?.accountId ?? next?.account_id ?? null;
+        if (nextAccountId) setOauthAccountId(String(nextAccountId));
+        setLoading(false);
+      })
+      .catch(() => {
+        setLoading(false);
+        setCtxTimedOut(true);
+      });
+  };
 
   const startAuthPoll = (accountId) => {
     if (authPollRef.current) clearInterval(authPollRef.current);
@@ -390,6 +455,14 @@ export default function App() {
   const hasAccountId = Boolean(accountId);
   const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
 
+  const updateLastRequest = (payload) => {
+    setLastRequest(payload);
+    if (typeof window !== 'undefined') {
+      window.__BFR_LAST_REQUEST_ID = payload?.requestId || payload?.id || null;
+      window.__BFR_LAST_STATUS = payload?.status ?? null;
+    }
+  };
+
   const textColumns = useMemo(
     () =>
       (boardMeta.columns || [])
@@ -425,15 +498,23 @@ export default function App() {
       setError('Authorization URL is unavailable. Check VITE_API_BASE_URL.');
       return;
     }
-    const popup = window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
-    if (!popup) {
-      setPopupBlocked(true);
-      return;
+    let opened = false;
+    try {
+      monday.execute?.('openLink', { url: authorizeUrl, target: 'newTab' });
+      opened = true;
+    } catch {}
+    if (!opened) {
+      const popup = window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
+      if (!popup) {
+        setPopupBlocked(true);
+        return;
+      }
     }
     startAuthPoll(accountId);
   };
 
   const apiRequest = async ({ path, body }) => {
+    if (authIssue === 'oauth') return null;
     const parseAuthCode = (text) => {
       try {
         const payload = text ? JSON.parse(text) : null;
@@ -571,13 +652,13 @@ export default function App() {
 
     const requestId = Date.now();
     const requestTime = new Date().toLocaleString();
-    setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: '—' });
+    updateLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: '—' });
 
     try {
       const result = await apiRequest({ path: '/api/preview', body: buildPayload(cursor) });
       if (!result) return;
       const responseRequestId = result.response.headers.get('x-request-id') || '';
-      setLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: result.response.status, requestId: responseRequestId });
+      updateLastRequest({ id: requestId, time: requestTime, endpoint: `${API_BASE}/api/preview`, status: result.response.status, requestId: responseRequestId });
       if (!result.response.ok) {
         setError(formatRequestError('We could not load preview results. Try again or open Diagnostics.', responseRequestId));
         return;
@@ -672,7 +753,7 @@ export default function App() {
       });
       if (!result) return;
       const responseRequestId = result.response.headers.get('x-request-id') || '';
-      setLastRequest({ id: Date.now(), time: new Date().toLocaleString(), endpoint: `${API_BASE}/api/apply`, status: result.response.status, requestId: responseRequestId });
+      updateLastRequest({ id: Date.now(), time: new Date().toLocaleString(), endpoint: `${API_BASE}/api/apply`, status: result.response.status, requestId: responseRequestId });
       if (!result.response.ok) {
         setError(formatRequestError('Couldn’t apply changes. Try again. If it persists, open Diagnostics and share Request ID.', responseRequestId));
         return;
@@ -935,6 +1016,19 @@ export default function App() {
         {loading && <InlineNotice tone="neutral">Loading Monday context…</InlineNotice>}
         {!loading && !ctx && <InlineNotice tone="error">Unable to load Monday context.</InlineNotice>}
         {ctxErr && <InlineNotice tone="error">Context error: {ctxErr}</InlineNotice>}
+        {ctxTimedOut && !ctx && (
+          <InlineNotice tone="error">
+            <div className="notice__row">
+              <div>Can’t reach Monday context.</div>
+              <button className="btn btn-secondary" type="button" onClick={handleRetryContext}>
+                Retry
+              </button>
+            </div>
+            <a className="muted" href={VERCEL_URL} target="_blank" rel="noreferrer">
+              Open in new tab
+            </a>
+          </InlineNotice>
+        )}
 
         {showError && (
           <InlineNotice tone="error">
@@ -963,7 +1057,7 @@ export default function App() {
             <div className="notice__row">
               <div>{OAUTH_REQUIRED_MESSAGE}</div>
               <button className="btn btn-primary" type="button" onClick={handleOAuthReconnect}>
-                Connect
+                Reconnect
               </button>
             </div>
             {popupBlocked && (
@@ -1122,7 +1216,7 @@ export default function App() {
                 : 'Apply changes'
             }
           >
-            Apply changes
+            {dryRun ? 'Run preview' : 'Apply changes'}
           </button>
         </section>
       </main>
@@ -1237,5 +1331,20 @@ export default function App() {
 
       {toast && <Toast message={toast} onClose={() => setToast('')} />}
     </div>
+  );
+}
+
+export default function App() {
+  const diagnostics = {
+    build: import.meta.env.VITE_GIT_SHA || import.meta.env.VITE_COMMIT_SHA || import.meta.env.VITE_APP_VERSION || 'unknown',
+    apiBase: import.meta.env.VITE_API_BASE_URL || '',
+    lastRequestId: window.__BFR_LAST_REQUEST_ID || null,
+    lastStatus: window.__BFR_LAST_STATUS || null
+  };
+
+  return (
+    <ErrorBoundary diagnostics={diagnostics}>
+      <AppContent />
+    </ErrorBoundary>
   );
 }

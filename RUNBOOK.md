@@ -99,6 +99,7 @@ Troubleshooting
 - Docs warning: docs API calls are best-effort; add doc IDs manually or disable docs target.
 - Apply failed: open Diagnostics, copy Request ID, and check server logs for the same requestId.
 - 429/5xx errors: apply uses retries with backoff, but large runs may need lower max changes.
+ - Blank screen or auth loop: hard refresh, then use Reconnect (new tab). If it persists, remove/re-add the board view.
 
 Assumptions (no web research)
 - Docs queries/mutations use `docs(ids: ...)` and `update_doc_block` with `content`.

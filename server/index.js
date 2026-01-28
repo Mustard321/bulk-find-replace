@@ -174,12 +174,16 @@ const buildAuthDebug = ({ authHeader, token, startsWithBearer }) => {
   const trimmedToken = token.trim();
   const hasDots = trimmedToken.split('.').length === 3;
   const tokenType = startsWithBearer ? 'bearer' : (authHeader ? 'raw' : 'none');
+  const tokenPrefix = trimmedToken ? `${trimmedToken.slice(0, 6)}…` : '';
+  const tokenSuffix = trimmedToken ? `…${trimmedToken.slice(-6)}` : '';
   return {
     authHeaderPresent: Boolean(authHeader),
     tokenType,
     tokenLength: trimmedToken.length,
     hasDots,
-    startsWithBearer
+    startsWithBearer,
+    tokenPrefix,
+    tokenSuffix
   };
 };
 
@@ -278,6 +282,7 @@ const mondayAuth = (req, res, next) => {
     return res.status(401).json({
       error: 'Unauthorized',
       code: 'AUTH_SESSION_INVALID',
+      authError: 'AUTH_INVALID',
       requestId: req.requestId
     });
   }
@@ -433,14 +438,8 @@ app.get('/auth/callback', async (req, res) => {
       (function () {
         try {
           if (window.opener) {
-            window.opener.postMessage({ type: "MUSTARD_OAUTH_SUCCESS", accountId: "${tokenAccountId}" }, "*");
+            window.opener.postMessage({ type: "mustard_oauth_success", accountId: "${tokenAccountId}" }, "*");
             window.opener.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
-          }
-        } catch (e) {}
-        try {
-          if (window.parent && window.parent !== window) {
-            window.parent.postMessage({ type: "MUSTARD_OAUTH_SUCCESS", accountId: "${tokenAccountId}" }, "*");
-            window.parent.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
           }
         } catch (e) {}
         try { window.close(); } catch (e) {}

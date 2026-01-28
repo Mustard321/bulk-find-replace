@@ -175,7 +175,7 @@ const WhereToLookCard = ({
       </details>
 
       {metaError && (
-        <div className={`notice ${metaWaiting ? 'notice--neutral' : 'notice--error'} surface-2`}>
+        <div className={`notice ${metaWaiting ? 'notice--neutral' : 'notice--warn'} surface-2`}>
           <div>{metaError}</div>
           {!metaWaiting && (
             <button className="btn btn-secondary" type="button" onClick={onRetryMeta}>

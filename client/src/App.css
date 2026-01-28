@@ -262,6 +262,10 @@ button {
   border: 1px solid var(--border);
 }
 
+.notice--warn {
+  border: 1px solid var(--warn);
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -642,6 +646,17 @@ button {
   align-items: center;
   gap: 12px;
   z-index: 25;
+}
+
+.crash-diagnostics {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  max-height: 220px;
+  overflow: auto;
 }
 
 .sr-only {
