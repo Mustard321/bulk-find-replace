@@ -108,8 +108,12 @@ app.use(cors(corsOptions));
 app.options('/api/*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
-const dbPath = process.env.TOKENS_DB_PATH || './tokens.db';
-const resolvedDbPath = path.resolve(dbPath);
+const getTokensDbPath = () => {
+  const configured = (process.env.TOKENS_DB_PATH || '').trim();
+  const fallback = path.join(process.cwd(), 'tokens.db');
+  return path.resolve(configured || fallback);
+};
+const resolvedDbPath = getTokensDbPath();
 console.log('[env] TOKENS_DB_PATH:', resolvedDbPath);
 const db = new Database(resolvedDbPath);
 db.prepare('CREATE TABLE IF NOT EXISTS tokens (account_id TEXT PRIMARY KEY, token TEXT)').run();
@@ -131,11 +135,17 @@ db.prepare(`CREATE TABLE IF NOT EXISTS audit_log (
 try { db.prepare('ALTER TABLE audit_log ADD COLUMN item_name TEXT').run(); } catch {}
 try { db.prepare('ALTER TABLE audit_log ADD COLUMN column_title TEXT').run(); } catch {}
 
-const saveToken = (id, token) =>
+const saveToken = (id, token) => {
   db.prepare('INSERT OR REPLACE INTO tokens VALUES (?, ?)').run(id, token);
+  console.log(`[oauth] tokenStored=true accountId=${id} tokensDbPath=${resolvedDbPath}`);
+};
 
-const getToken = id =>
-  db.prepare('SELECT token FROM tokens WHERE account_id = ?').get(id)?.token;
+const getToken = id => {
+  const row = db.prepare('SELECT token FROM tokens WHERE account_id = ?').get(id);
+  const tokenRowFound = Boolean(row?.token);
+  console.log(`[oauth] tokenRowFound=${tokenRowFound} accountIdUsed=${id} tokensDbPath=${resolvedDbPath}`);
+  return row?.token;
+};
 
 const insertAudit = db.prepare(
   `INSERT INTO audit_log
@@ -469,11 +479,18 @@ app.get('/api/auth/status', (req, res) => {
   if (!accountId) {
     return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
   }
-  if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
+  const normalized = normalizeAccountId(accountId);
+  if (!normalized) {
     return res.status(400).send('Invalid accountId');
   }
-  const token = getToken(accountId);
-  return res.json({ ok: true, authorized: Boolean(token) });
+  const token = getToken(String(normalized));
+  const connected = Boolean(token);
+  return res.json({
+    ok: true,
+    authorized: connected,
+    connected,
+    code: connected ? null : 'AUTH_NOT_CONNECTED'
+  });
 });
 
 const normalizeLineEndings = (text) => String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');

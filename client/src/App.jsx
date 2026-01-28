@@ -16,7 +16,7 @@ import { formatNumber } from './utils/formatters.jsx';
 const PAGE_SIZE = 200;
 const APPLY_AVAILABLE = true;
 const AUTH_EXPIRED_MESSAGE = 'Session expired. Reload the app.';
-const OAUTH_REQUIRED_MESSAGE = 'Connect Mustard to Monday to continue.';
+const OAUTH_REQUIRED_MESSAGE = 'Connect Mustard to Monday to load board fields and run previews.';
 const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
 const DRY_RUN_KEY = 'mustard_bfr_dry_run';
 const META_CACHE_KEY = '__BFR_BOARD_META_CACHE';
@@ -228,9 +228,17 @@ export default function App() {
       fetch(`${API_BASE}/api/auth/status?accountId=${encodeURIComponent(accountId)}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-        if (d?.authorized) {
+        if (d?.connected || d?.authorized) {
           setAuthIssue(null);
+          if (typeof window !== 'undefined') {
+            const cacheStore = window[META_CACHE_KEY] || {};
+            delete cacheStore[boardId];
+            window[META_CACHE_KEY] = cacheStore;
+          }
           retryLastAction();
+        } else if (d?.code === 'AUTH_NOT_CONNECTED') {
+          setAuthIssue('oauth');
+          setError(OAUTH_REQUIRED_MESSAGE);
         }
         })
         .catch(() => {});
@@ -329,7 +337,7 @@ export default function App() {
       setError('Authorization URL is unavailable. Check VITE_API_BASE_URL.');
       return;
     }
-    monday.execute('openLink', { url: authorizeUrl, target: 'newTab' });
+    window.location.href = authorizeUrl;
     startAuthPoll(accountId);
   };
 
@@ -420,7 +428,9 @@ export default function App() {
       .then((result) => {
         if (!mounted || !result) return;
         if (!result.response.ok) {
-          setMetaError('Unable to load fields or groups.');
+          if (!authIssue) {
+            setMetaError('Unable to load fields or groups.');
+          }
           return;
         }
         let data;
@@ -448,7 +458,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [boardId, accountId, hasApiBase]);
+  }, [boardId, accountId, hasApiBase, authIssue]);
 
   const setDryRunPreference = (value) => {
     setDryRun(value);
@@ -898,7 +908,6 @@ export default function App() {
                 Connect
               </button>
             </div>
-            <div className="muted">Connect your Monday account to continue.</div>
           </InlineNotice>
         )}
 
