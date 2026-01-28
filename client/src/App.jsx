@@ -16,6 +16,7 @@ import { formatNumber } from './utils/formatters.jsx';
 const PAGE_SIZE = 200;
 const APPLY_AVAILABLE = true;
 const AUTH_EXPIRED_MESSAGE = 'Session expired. Reload the app.';
+const OAUTH_REQUIRED_MESSAGE = 'Account not connected. Reconnect to continue.';
 const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
 const DRY_RUN_KEY = 'mustard_bfr_dry_run';
 const META_CACHE_KEY = '__BFR_BOARD_META_CACHE';
@@ -58,7 +59,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState('');
-  const [authRequired, setAuthRequired] = useState(false);
+  const [authIssue, setAuthIssue] = useState(null);
   const [boardId, setBoardId] = useState(null);
   const [oauthAccountId, setOauthAccountId] = useState('');
   const [sessionTokenInfo, setSessionTokenInfo] = useState({
@@ -212,11 +213,11 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (!authRequired) {
+    if (!authIssue || authIssue !== 'session') {
       window.sessionStorage.removeItem(RELOAD_ATTEMPT_KEY);
       setReloadAttempted(false);
     }
-  }, [authRequired]);
+  }, [authIssue]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -227,7 +228,10 @@ export default function App() {
       fetch(`${API_BASE}/api/auth/status?accountId=${encodeURIComponent(accountId)}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (d?.authorized) setAuthRequired(false);
+        if (d?.authorized) {
+          setAuthIssue(null);
+          retryLastAction();
+        }
         })
         .catch(() => {});
     };
@@ -295,7 +299,8 @@ export default function App() {
         if (!r.ok) return;
         const d = await r.json();
         if (d?.authorized) {
-          setAuthRequired(false);
+          setAuthIssue(null);
+          retryLastAction();
           clearInterval(authPollRef.current);
           authPollRef.current = null;
         }
@@ -349,7 +354,7 @@ export default function App() {
 
   const handleReconnect = () => {
     setError('');
-    setAuthRequired(false);
+    setAuthIssue(null);
     // sessionToken is per iframe session; OAuth token lives server-side.
     // A reload is the correct recovery for an expired sessionToken.
     if (typeof window !== 'undefined') {
@@ -358,7 +363,30 @@ export default function App() {
     }
   };
 
+  const handleOAuthReconnect = () => {
+    setError('');
+    setAuthIssue(null);
+    if (!hasAccountId) {
+      setError('Missing accountId.');
+      return;
+    }
+    if (!authorizeUrl) {
+      setError('Authorization URL is unavailable. Check VITE_API_BASE_URL.');
+      return;
+    }
+    monday.execute('openLink', { url: authorizeUrl, target: 'newTab' });
+    startAuthPoll(accountId);
+  };
+
   const apiRequest = async ({ path, body }) => {
+    const parseAuthCode = (text) => {
+      try {
+        const payload = text ? JSON.parse(text) : null;
+        return payload?.code || '';
+      } catch {
+        return '';
+      }
+    };
     const attempt = async () => {
       const token = await getSessionToken();
       if (!token) return { error: 'NO_TOKEN' };
@@ -377,18 +405,30 @@ export default function App() {
 
     let result = await attempt();
     if (result?.error === 'NO_TOKEN') {
-      setAuthRequired(true);
+      setAuthIssue('session');
       setError(AUTH_EXPIRED_MESSAGE);
       return null;
     }
     if (result?.response?.status === 401) {
       result = await attempt();
-      if (result?.error === 'NO_TOKEN' || result?.response?.status === 401) {
-        setAuthRequired(true);
+      if (result?.error === 'NO_TOKEN') {
+        setAuthIssue('session');
         setError(AUTH_EXPIRED_MESSAGE);
         return null;
       }
+      if (result?.response?.status === 401) {
+        const code = parseAuthCode(result.text);
+        if (code === 'AUTH_NOT_CONNECTED' || code === 'AUTH_OAUTH_FAILED') {
+          setAuthIssue('oauth');
+          setError(OAUTH_REQUIRED_MESSAGE);
+        } else {
+          setAuthIssue('session');
+          setError(AUTH_EXPIRED_MESSAGE);
+        }
+        return null;
+      }
     }
+    setAuthIssue(null);
     return result;
   };
 
@@ -426,7 +466,7 @@ export default function App() {
 
   const runPreview = async ({ cursor = null, reset = false } = {}) => {
     setError('');
-    setAuthRequired(false);
+    setAuthIssue(null);
     setPreview([]);
     setSummary({ totalMatches: 0, totalItems: 0 });
     setPreviewLoading(true);
@@ -533,6 +573,7 @@ export default function App() {
     }
     setApplyLoading(true);
     setError('');
+    setAuthIssue(null);
     setApplyTotal(summary.totalMatches || 0);
     setApplyProgress(0);
     setApplyFailures(0);
@@ -592,7 +633,7 @@ export default function App() {
   const canPreview =
     Boolean(boardId) && findTrimmed.length >= 2 && targetsSelected && hasFieldSelection && !previewLoading && !loading && hasAccountId;
   const previewDisabled = !canPreview;
-  const showError = Boolean(error) && !(authRequired && error.startsWith(AUTH_EXPIRED_MESSAGE));
+  const showError = Boolean(error) && !authIssue;
   const needsRemoveConfirm = replace.length === 0 && findTrimmed.length > 0;
 
   const debouncedSearch = useDebouncedValue(searchInput);
@@ -816,7 +857,7 @@ export default function App() {
           </InlineNotice>
         )}
 
-        {authRequired && (
+        {authIssue === 'session' && (
           <InlineNotice tone="error">
             <div className="notice__row">
               <div>{AUTH_EXPIRED_MESSAGE}</div>
@@ -828,6 +869,18 @@ export default function App() {
             {reloadAttempted && (
               <div className="muted">If this keeps happening, remove and re-add the app view.</div>
             )}
+          </InlineNotice>
+        )}
+
+        {authIssue === 'oauth' && (
+          <InlineNotice tone="error">
+            <div className="notice__row">
+              <div>{OAUTH_REQUIRED_MESSAGE}</div>
+              <button className="btn btn-primary" type="button" onClick={handleOAuthReconnect}>
+                Reconnect
+              </button>
+            </div>
+            <div className="muted">Reconnect your Monday account to continue.</div>
           </InlineNotice>
         )}
 

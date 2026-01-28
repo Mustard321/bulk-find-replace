@@ -182,17 +182,6 @@ const verifyMondayJwt = (token) => {
   return { decoded, verifiedWith: 'SIGNING' };
 };
 
-const mapJwtErrorCode = (err, debug) => {
-  if (err?.name === 'SIGNING_SECRET_MISSING') return 'SIGNING_SECRET_MISSING';
-  if (!debug?.hasDots) return 'JWT_MALFORMED';
-  if (err?.name === 'TokenExpiredError') return 'JWT_EXPIRED';
-  if (err?.name === 'JsonWebTokenError') {
-    if (String(err?.message || '').toLowerCase().includes('signature')) return 'JWT_INVALID_SIGNATURE';
-    return 'JWT_MALFORMED';
-  }
-  return 'JWT_MALFORMED';
-};
-
 const mondayAuth = (req, res, next) => {
   const authHeader = req.headers.authorization || '';
   const startsWithBearer = authHeader.startsWith('Bearer ');
@@ -205,7 +194,7 @@ const mondayAuth = (req, res, next) => {
     }
     return res.status(401).json({
       error: 'Unauthorized',
-      code: 'JWT_MALFORMED',
+      code: 'AUTH_SESSION_INVALID',
       requestId: req.requestId
     });
   }
@@ -215,12 +204,13 @@ const mondayAuth = (req, res, next) => {
     }
     return res.status(401).json({
       error: 'Unauthorized',
-      code: 'JWT_MALFORMED',
+      code: 'AUTH_SESSION_INVALID',
       requestId: req.requestId
     });
   }
 
   try {
+    console.log('[mondayAuth] using session token');
     const { decoded, verifiedWith } = verifyMondayJwt(token);
     req.mondayJwt = decoded;
     req.mondayVerifiedWith = verifiedWith;
@@ -238,7 +228,7 @@ const mondayAuth = (req, res, next) => {
     );
     return res.status(401).json({
       error: 'Unauthorized',
-      code: mapJwtErrorCode(e, debug),
+      code: 'AUTH_SESSION_INVALID',
       requestId: req.requestId
     });
   }
@@ -312,7 +302,7 @@ app.get('/api/debug/verify', (req, res) => {
   } catch (e) {
     return res.status(401).json({
       ok: false,
-      code: mapJwtErrorCode(e, debug),
+      code: 'AUTH_SESSION_INVALID',
       tokenShape: debug,
       requestId: req.requestId
     });
@@ -770,7 +760,7 @@ const updateDocBlock = async ({ token, blockId, content }) => {
   return response.data;
 };
 
-app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
+app.post('/api/preview', rateLimit, async (req, res) => {
   const { accountId, boardId, find, replace } = req.body || {};
   if (!accountId) {
     return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
@@ -786,7 +776,10 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
   }
 
   const token = getToken(accountId);
-  if (!token) return res.status(401).json({ ok: false, error: 'NOT_AUTHORIZED' });
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_NOT_CONNECTED', requestId: req.requestId });
+  }
+  console.log('[preview] using oauth token');
 
   const targets = normalizeTargets(req.body?.targets);
   const rules = normalizeRules(req.body?.rules);
@@ -977,12 +970,15 @@ app.post('/api/preview', rateLimit, mondayAuth, async (req, res) => {
       warnings
     });
   } catch (err) {
+    if (err?.response?.status === 401) {
+      return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_OAUTH_FAILED', requestId: req.requestId });
+    }
     console.error(`[preview] failed requestId=${req.requestId} status=${err.response?.status || ''} message=${err.message || ''}`);
     return res.status(500).send('Preview failed');
   }
 });
 
-app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
+app.post('/api/apply', rateLimit, async (req, res) => {
   const { accountId, boardId, find, replace, confirmText, confirmed } = req.body || {};
   if (!accountId) {
     return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
@@ -1001,7 +997,10 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
   }
 
   const token = getToken(accountId);
-  if (!token) return res.status(401).json({ ok: false, error: 'NOT_AUTHORIZED' });
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_NOT_CONNECTED', requestId: req.requestId });
+  }
+  console.log('[apply] using oauth token');
 
   const targets = normalizeTargets(req.body?.targets);
   const rules = normalizeRules(req.body?.rules);
@@ -1298,6 +1297,9 @@ app.post('/api/apply', rateLimit, mondayAuth, async (req, res) => {
       limitReached
     });
   } catch (err) {
+    if (err?.response?.status === 401) {
+      return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_OAUTH_FAILED', requestId: req.requestId });
+    }
     console.error(`[apply] failed requestId=${req.requestId} status=${err.response?.status || ''} message=${err.message || ''}`);
     return res.status(500).send('Apply failed');
   }
