@@ -115,6 +115,8 @@ const getTokensDbPath = () => {
 };
 const resolvedDbPath = getTokensDbPath();
 console.log('[env] TOKENS_DB_PATH:', resolvedDbPath);
+const serverBuildId = process.env.GIT_SHA || process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || 'unknown';
+console.log('[env] SERVER_BUILD_SHA:', serverBuildId);
 const db = new Database(resolvedDbPath);
 db.prepare('CREATE TABLE IF NOT EXISTS tokens (account_id TEXT PRIMARY KEY, token TEXT)').run();
 db.prepare(`CREATE TABLE IF NOT EXISTS audit_log (
@@ -497,12 +499,13 @@ app.get('/api/auth/status', (req, res) => {
   if (!accountId) {
     return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
   }
-  const normalized = normalizeAccountId(accountId);
-  if (!normalized) {
+  const normalizedText = String(accountId).trim();
+  if (!/^\d+$/.test(normalizedText)) {
     return res.status(400).send('Invalid accountId');
   }
-  const token = getToken(String(normalized));
+  const token = getToken(normalizedText);
   const connected = Boolean(token);
+  console.log(`[auth-status] accountIdUsed=${normalizedText} tokensDbPath=${resolvedDbPath} tokenRowFound=${connected}`);
   return res.json({
     ok: true,
     authorized: connected,

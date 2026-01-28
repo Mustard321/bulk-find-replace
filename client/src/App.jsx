@@ -400,7 +400,7 @@ function AppContent() {
     setIsConnecting(true);
     authPollRef.current = setInterval(async () => {
       attempts += 1;
-      if (attempts > 30) {
+      if (attempts > 60) {
         clearInterval(authPollRef.current);
         authPollRef.current = null;
         setIsConnecting(false);
