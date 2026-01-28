@@ -433,13 +433,13 @@ app.get('/auth/callback', async (req, res) => {
       (function () {
         try {
           if (window.opener) {
-            window.opener.postMessage({ type: "mustard_oauth_success", accountId: "${tokenAccountId}" }, "*");
+            window.opener.postMessage({ type: "MUSTARD_OAUTH_SUCCESS", accountId: "${tokenAccountId}" }, "*");
             window.opener.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
           }
         } catch (e) {}
         try {
           if (window.parent && window.parent !== window) {
-            window.parent.postMessage({ type: "mustard_oauth_success", accountId: "${tokenAccountId}" }, "*");
+            window.parent.postMessage({ type: "MUSTARD_OAUTH_SUCCESS", accountId: "${tokenAccountId}" }, "*");
             window.parent.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
           }
         } catch (e) {}

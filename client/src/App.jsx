@@ -95,6 +95,8 @@ export default function App() {
   const [reloadAttempted, setReloadAttempted] = useState(false);
   const [lastAuthRefresh, setLastAuthRefresh] = useState('');
   const [lastRequestStatus, setLastRequestStatus] = useState('—');
+  const [popupBlocked, setPopupBlocked] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const applyTimerRef = useRef(null);
   const lastFailedActionRef = useRef(null);
   const authRetryRef = useRef(false);
@@ -124,6 +126,19 @@ export default function App() {
     window.__BFR_MONDAY = window.__BFR_MONDAY || monday;
   }, [monday]);
 
+  const decodeJwtPayload = (token) => {
+    if (!token) return null;
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    try {
+      const base = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base.padEnd(Math.ceil(base.length / 4) * 4, '=');
+      return JSON.parse(atob(padded));
+    } catch {
+      return null;
+    }
+  };
+
   useEffect(() => {
     let mounted = true;
     const normalizeContext = (data) => data?.data ?? data;
@@ -134,6 +149,8 @@ export default function App() {
       data?.data?.user?.account?.id ||
       data?.data?.user?.account_id ||
       data?.data?.user?.accountId ||
+      data?.accountId ||
+      data?.account_id ||
       null;
     const unsubscribe = monday.listen('context', (c) => {
       if (!mounted) return;
@@ -221,7 +238,10 @@ export default function App() {
   }, [authIssue]);
 
   const loadBoardMeta = async () => {
-    if (!boardId || !accountId || !hasApiBase) return;
+    if (!boardId || !accountId) {
+      setMetaError('Waiting for Monday context…');
+      return;
+    }
     if (typeof window === 'undefined') return;
     const cacheStore = window[META_CACHE_KEY] || {};
     if (cacheStore[boardId]) {
@@ -231,33 +251,17 @@ export default function App() {
     }
     setMetaLoading(true);
     setMetaError('');
-    const query = `query($id: ID!) {
-      boards(ids: [$id]) {
-        columns { id title type }
-        groups { id title }
-      }
-    }`;
     try {
-      const result = await apiRequest({
-        path: '/api/graphql',
-        body: {
-          accountId: String(accountId),
-          query,
-          variables: { id: boardId }
-        }
-      });
-      if (!result) return;
-      if (!result.response.ok) {
-        if (!authIssue) setMetaError('Unable to load fields or groups.');
-        return;
-      }
-      let data;
-      try {
-        data = result.text ? JSON.parse(result.text) : null;
-      } catch {
-        data = null;
-      }
-      const board = data?.data?.boards?.[0];
+      const res = await monday.api(
+        `query($id: ID!) {
+          boards(ids: [$id]) {
+            columns { id title type }
+            groups { id title }
+          }
+        }`,
+        { variables: { id: boardId } }
+      );
+      const board = res?.data?.boards?.[0];
       const nextMeta = {
         columns: board?.columns || [],
         groups: board?.groups || []
@@ -265,7 +269,11 @@ export default function App() {
       setBoardMeta(nextMeta);
       window[META_CACHE_KEY] = { ...cacheStore, [boardId]: nextMeta };
     } catch (err) {
-      setMetaError(String(err?.message || err));
+      if (!boardId || !accountId) {
+        setMetaError('Waiting for Monday context…');
+      } else {
+        setMetaError(String(err?.message || 'Unable to load fields or groups.'));
+      }
       setBoardMeta({ columns: [], groups: [] });
     } finally {
       setMetaLoading(false);
@@ -296,6 +304,7 @@ export default function App() {
           setAuthIssue('oauth');
           setError(OAUTH_REQUIRED_MESSAGE);
         }
+        setIsConnecting(false);
       })
       .catch(() => {});
   };
@@ -303,32 +312,42 @@ export default function App() {
   useEffect(() => {
     const handler = (e) => {
       if (!e?.data?.type) return;
-      if (e.data.type !== 'BFR_OAUTH_OK' && e.data.type !== 'mustard_oauth_success') return;
+      if (e.data.type !== 'BFR_OAUTH_OK' && e.data.type !== 'mustard_oauth_success' && e.data.type !== 'MUSTARD_OAUTH_SUCCESS') return;
       handleAuthSuccess(e.data.accountId);
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, [API_BASE]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('authorized') === '1' && accountId) {
+      startAuthPoll(accountId);
+    }
+  }, [accountId]);
+
   const startAuthPoll = (accountId) => {
     if (authPollRef.current) clearInterval(authPollRef.current);
     let attempts = 0;
+    setIsConnecting(true);
     authPollRef.current = setInterval(async () => {
       attempts += 1;
-      if (attempts > 10) {
+      if (attempts > 30) {
         clearInterval(authPollRef.current);
         authPollRef.current = null;
+        setIsConnecting(false);
         return;
       }
       try {
         const r = await fetch(`${API_BASE}/api/auth/status?accountId=${encodeURIComponent(accountId)}`);
         if (!r.ok) return;
         const d = await r.json();
-        if (d?.authorized) {
+        if (d?.connected || d?.authorized) {
           setAuthIssue(null);
           retryLastAction();
           clearInterval(authPollRef.current);
           authPollRef.current = null;
+          setIsConnecting(false);
         }
       } catch {
         // ignore transient polling errors
@@ -350,6 +369,11 @@ export default function App() {
       const token = tokenRes?.data || '';
       setSessionTokenInfo(formatTokenInfo(token));
       setLastAuthRefresh(new Date().toLocaleString());
+      if (!oauthAccountId) {
+        const payload = decodeJwtPayload(token);
+        const datAccountId = payload?.dat?.account_id || payload?.data?.dat?.account_id || payload?.account_id || null;
+        if (datAccountId) setOauthAccountId(String(datAccountId));
+      }
       return token || null;
     } catch {
       setSessionTokenInfo({ present: false, looksJwt: false, length: 0, tail: '' });
@@ -392,6 +416,7 @@ export default function App() {
   const handleOAuthReconnect = () => {
     setError('');
     setAuthIssue(null);
+    setPopupBlocked(false);
     if (!hasAccountId) {
       setError('Missing accountId.');
       return;
@@ -402,7 +427,8 @@ export default function App() {
     }
     const popup = window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
     if (!popup) {
-      window.location.href = authorizeUrl;
+      setPopupBlocked(true);
+      return;
     }
     startAuthPoll(accountId);
   };
@@ -475,13 +501,10 @@ export default function App() {
     loadBoardMeta();
   };
   useEffect(() => {
-    let mounted = true;
     if (!boardId || !accountId) return () => {};
     loadBoardMeta();
-    return () => {
-      mounted = false;
-    };
-  }, [boardId, accountId, hasApiBase, authIssue]);
+    return () => {};
+  }, [boardId, accountId, authIssue]);
 
   const setDryRunPreference = (value) => {
     setDryRun(value);
@@ -663,8 +686,17 @@ export default function App() {
       if (data?.runId) setLastRunId(data.runId);
       setApplyProgress(data?.updated || 0);
       setApplyFailures(data?.errors?.length || 0);
-      setToast(`Apply complete. Updated: ${data?.updated || 0}.`);
+      setToast(`Applied ${data?.updated || 0} updates.`);
       setApplyResult({ mode: 'apply', ...buildApplyCounts(), runId: data?.runId || '' });
+      try {
+        await monday.execute?.('reloadBoard');
+      } catch {}
+      try {
+        await monday.execute?.('reload');
+      } catch {}
+      try {
+        await monday.execute?.('refresh');
+      } catch {}
       setApplyOpen(false);
       setDryRunPreference(false);
     } catch (e) {
@@ -700,13 +732,15 @@ export default function App() {
   }, [preview, debouncedSearch, showOnlyChanged]);
 
   const currentStep = previewLoading || preview.length > 0 ? 4 : findTrimmed.length >= 2 ? 3 : targetsSelected ? 2 : 1;
-  const applyDisabled = !APPLY_AVAILABLE || previewLoading || preview.length === 0 || summary.totalMatches === 0 || applyLoading;
+  const applyDisabled = !APPLY_AVAILABLE || previewLoading || preview.length === 0 || summary.totalMatches === 0 || applyLoading || dryRun;
 
   const applyStatus = APPLY_AVAILABLE ? (summary.totalMatches > 0 ? 'Ready' : 'Preview only') : 'Preview only';
   const applyHelper = APPLY_AVAILABLE
-    ? summary.totalMatches > 0
-      ? 'Review the preview and confirm to apply.'
-      : 'Run a preview to unlock apply.'
+    ? dryRun
+      ? 'Dry run is on. Turn it off to apply changes.'
+      : summary.totalMatches > 0
+        ? 'Review the preview and confirm to apply.'
+        : 'Run a preview to unlock apply.'
     : 'Bulk apply will be enabled once updates are available.';
 
   const buildApplyCounts = () => {
@@ -780,6 +814,7 @@ export default function App() {
     ? `Selected groups: ${selectedGroupNames.join(', ')}`
     : `All groups (${groupOptions.length})`;
   const dryRunSummary = dryRun ? 'Dry run: on' : 'Dry run: off';
+  const metaWaiting = metaError === 'Waiting for Monday context…';
 
   const DiagnosticsPanel = () => (
     <div className="diagnostics surface-2">
@@ -931,6 +966,10 @@ export default function App() {
                 Connect
               </button>
             </div>
+            {popupBlocked && (
+              <div className="muted">Pop-up blocked. Please allow pop-ups for monday.com and try again.</div>
+            )}
+            {isConnecting && <div className="muted">Connecting to Monday…</div>}
           </InlineNotice>
         )}
 
@@ -964,6 +1003,7 @@ export default function App() {
           metaLoading={metaLoading}
           metaError={metaError}
           onRetryMeta={handleRetryMeta}
+          metaWaiting={metaWaiting}
         />
 
         <WhatToChangeCard
@@ -1050,6 +1090,9 @@ export default function App() {
             <div className="muted apply-undo">
               Undo plan: re-run with swapped find/replace using the audit log as reference.
             </div>
+            {applyResult.mode !== 'dry' && (
+              <div className="muted">If you don’t see updates yet, refresh the board view.</div>
+            )}
           </section>
         )}
 
@@ -1071,9 +1114,15 @@ export default function App() {
             type="button"
             disabled={applyDisabled}
             onClick={() => setApplyOpen(true)}
-            title={applyDisabled ? 'Run a preview before applying changes.' : 'Apply changes'}
+            title={
+              applyDisabled
+                ? dryRun
+                  ? 'Turn off dry run to apply changes.'
+                  : 'Run a preview before applying changes.'
+                : 'Apply changes'
+            }
           >
-            {dryRun ? 'Run dry run' : 'Apply changes'}
+            Apply changes
           </button>
         </section>
       </main>

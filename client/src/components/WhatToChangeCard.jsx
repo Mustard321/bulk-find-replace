@@ -66,7 +66,7 @@ const WhatToChangeCard = ({
       </div>
       <div className="form-actions">
         <button className="btn btn-primary" type="button" onClick={onPreview} disabled={previewDisabled}>
-          {previewLoading ? 'Previewing…' : 'Preview changes'}
+          {previewLoading ? 'Previewing…' : 'Run preview'}
         </button>
         <div className="muted">Preview is a safe dry run. No data changes yet.</div>
       </div>

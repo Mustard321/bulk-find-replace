@@ -39,7 +39,8 @@ const WhereToLookCard = ({
   setDocIdsText,
   metaLoading,
   metaError,
-  onRetryMeta
+  onRetryMeta,
+  metaWaiting
 }) => {
   const selectedFieldNames = textColumns
     .filter((col) => includeColumnIds.includes(col.id))
@@ -174,11 +175,13 @@ const WhereToLookCard = ({
       </details>
 
       {metaError && (
-        <div className="notice notice--error surface-2">
-          <div>We couldn’t load fields or groups.</div>
-          <button className="btn btn-secondary" type="button" onClick={onRetryMeta}>
-            Retry loading fields
-          </button>
+        <div className={`notice ${metaWaiting ? 'notice--neutral' : 'notice--error'} surface-2`}>
+          <div>{metaError}</div>
+          {!metaWaiting && (
+            <button className="btn btn-secondary" type="button" onClick={onRetryMeta}>
+              Retry loading fields
+            </button>
+          )}
         </div>
       )}
     </section>
