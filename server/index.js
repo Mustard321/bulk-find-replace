@@ -109,7 +109,9 @@ app.options('/api/*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
 const dbPath = process.env.TOKENS_DB_PATH || './tokens.db';
-const db = new Database(dbPath);
+const resolvedDbPath = path.resolve(dbPath);
+console.log('[env] TOKENS_DB_PATH:', resolvedDbPath);
+const db = new Database(resolvedDbPath);
 db.prepare('CREATE TABLE IF NOT EXISTS tokens (account_id TEXT PRIMARY KEY, token TEXT)').run();
 db.prepare(`CREATE TABLE IF NOT EXISTS audit_log (
   run_id TEXT,
@@ -180,6 +182,34 @@ const verifyMondayJwt = (token) => {
   }
   const decoded = jwt.verify(token, signing, { algorithms: ['HS256'] });
   return { decoded, verifiedWith: 'SIGNING' };
+};
+
+const normalizeAccountId = (value) => {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text)) return null;
+  return Number(text);
+};
+
+const deriveAccountId = (req) => {
+  const bodyId = req.body?.accountId ?? req.body?.account_id;
+  const normalized = normalizeAccountId(bodyId);
+  if (normalized) return { accountId: normalized, source: 'body' };
+  if (bodyId !== undefined) return { accountId: null, source: 'body_invalid' };
+
+  const authHeader = req.headers.authorization || '';
+  const startsWithBearer = authHeader.startsWith('Bearer ');
+  const token = (startsWithBearer ? authHeader.slice(7) : authHeader).trim();
+  if (!token) return { accountId: null, source: 'missing' };
+  try {
+    const { decoded } = verifyMondayJwt(token);
+    const dat = decoded?.dat || decoded?.data?.dat || null;
+    const datAccountId = normalizeAccountId(dat?.account_id || decoded?.account_id);
+    if (datAccountId) return { accountId: datAccountId, source: 'session' };
+    return { accountId: null, source: 'session_missing' };
+  } catch {
+    return { accountId: null, source: 'session_invalid', sessionError: 'AUTH_SESSION_INVALID' };
+  }
 };
 
 const mondayAuth = (req, res, next) => {
@@ -396,19 +426,42 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 app.post('/api/graphql', rateLimit, async (req, res) => {
-  const { accountId, query, variables } = req.body || {};
-  if (typeof accountId !== 'string') return res.status(400).send('Invalid accountId');
-  if (!/^\d+$/.test(accountId)) return res.status(400).send('Invalid accountId');
+  const accountInfo = deriveAccountId(req);
+  if (!accountInfo.accountId) {
+    if (accountInfo.sessionError) {
+      console.log(`[graphql] requestId=${req.requestId} accountIdUsed=null tokensDbPath=${resolvedDbPath} tokenRowFound=false reason=${accountInfo.sessionError}`);
+      return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_SESSION_INVALID', requestId: req.requestId });
+    }
+    if (accountInfo.source === 'body_invalid') {
+      return res.status(400).json({ error: 'BadRequest', code: 'ACCOUNT_ID_INVALID', requestId: req.requestId });
+    }
+    return res.status(400).json({ error: 'BadRequest', code: 'ACCOUNT_ID_MISSING', requestId: req.requestId });
+  }
+  const { query, variables } = req.body || {};
   if (typeof query !== 'string') return res.status(400).send('Invalid query');
   if (variables !== undefined && (typeof variables !== 'object' || Array.isArray(variables))) {
     return res.status(400).send('Invalid variables');
   }
+  const accountId = String(accountInfo.accountId);
   const token = getToken(accountId);
-  if (!token) return res.status(401).json({ ok: false, error: 'NOT_AUTHORIZED' });
-  const r = await axios.post('https://api.monday.com/v2', { query, variables }, {
-    headers: { Authorization: token }
-  });
-  res.json(r.data);
+  const tokenRowFound = Boolean(token);
+  console.log(`[graphql] requestId=${req.requestId} accountIdUsed=${accountId} tokensDbPath=${resolvedDbPath} tokenRowFound=${tokenRowFound}`);
+  if (!token) {
+    console.log(`[graphql] requestId=${req.requestId} reason=AUTH_NOT_CONNECTED`);
+    return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_NOT_CONNECTED', requestId: req.requestId });
+  }
+  try {
+    const r = await axios.post('https://api.monday.com/v2', { query, variables }, {
+      headers: { Authorization: token }
+    });
+    return res.json(r.data);
+  } catch (err) {
+    if (err?.response?.status === 401) {
+      console.log(`[graphql] requestId=${req.requestId} reason=AUTH_OAUTH_FAILED`);
+      return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_OAUTH_FAILED', requestId: req.requestId });
+    }
+    throw err;
+  }
 });
 
 app.get('/api/auth/status', (req, res) => {
@@ -761,13 +814,19 @@ const updateDocBlock = async ({ token, blockId, content }) => {
 };
 
 app.post('/api/preview', rateLimit, async (req, res) => {
-  const { accountId, boardId, find, replace } = req.body || {};
-  if (!accountId) {
-    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+  const { boardId, find, replace } = req.body || {};
+  const accountInfo = deriveAccountId(req);
+  if (!accountInfo.accountId) {
+    if (accountInfo.sessionError) {
+      console.log(`[preview] requestId=${req.requestId} accountIdUsed=null tokensDbPath=${resolvedDbPath} tokenRowFound=false reason=AUTH_SESSION_INVALID`);
+      return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_SESSION_INVALID', requestId: req.requestId });
+    }
+    if (accountInfo.source === 'body_invalid') {
+      return res.status(400).json({ error: 'BadRequest', code: 'ACCOUNT_ID_INVALID', requestId: req.requestId });
+    }
+    return res.status(400).json({ error: 'BadRequest', code: 'ACCOUNT_ID_MISSING', requestId: req.requestId });
   }
-  if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
-    return res.status(400).send('Invalid accountId');
-  }
+  const accountId = String(accountInfo.accountId);
   if (typeof boardId !== 'number' && typeof boardId !== 'string') {
     return res.status(400).send('Invalid boardId');
   }
@@ -776,7 +835,10 @@ app.post('/api/preview', rateLimit, async (req, res) => {
   }
 
   const token = getToken(accountId);
+  const tokenRowFound = Boolean(token);
+  console.log(`[preview] requestId=${req.requestId} accountIdUsed=${accountId} tokensDbPath=${resolvedDbPath} tokenRowFound=${tokenRowFound}`);
   if (!token) {
+    console.log(`[preview] requestId=${req.requestId} reason=AUTH_NOT_CONNECTED`);
     return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_NOT_CONNECTED', requestId: req.requestId });
   }
   console.log('[preview] using oauth token');
@@ -971,6 +1033,7 @@ app.post('/api/preview', rateLimit, async (req, res) => {
     });
   } catch (err) {
     if (err?.response?.status === 401) {
+      console.log(`[preview] requestId=${req.requestId} reason=AUTH_OAUTH_FAILED`);
       return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_OAUTH_FAILED', requestId: req.requestId });
     }
     console.error(`[preview] failed requestId=${req.requestId} status=${err.response?.status || ''} message=${err.message || ''}`);
@@ -979,13 +1042,18 @@ app.post('/api/preview', rateLimit, async (req, res) => {
 });
 
 app.post('/api/apply', rateLimit, async (req, res) => {
-  const { accountId, boardId, find, replace, confirmText, confirmed } = req.body || {};
-  if (!accountId) {
-    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+  const { boardId, find, replace, confirmText, confirmed } = req.body || {};
+  const accountInfo = deriveAccountId(req);
+  if (!accountInfo.accountId) {
+    if (accountInfo.sessionError) {
+      return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_SESSION_INVALID', requestId: req.requestId });
+    }
+    if (accountInfo.source === 'body_invalid') {
+      return res.status(400).json({ error: 'BadRequest', code: 'ACCOUNT_ID_INVALID', requestId: req.requestId });
+    }
+    return res.status(400).json({ error: 'BadRequest', code: 'ACCOUNT_ID_MISSING', requestId: req.requestId });
   }
-  if (typeof accountId !== 'string' || !/^\d+$/.test(accountId)) {
-    return res.status(400).send('Invalid accountId');
-  }
+  const accountId = String(accountInfo.accountId);
   if (typeof boardId !== 'number' && typeof boardId !== 'string') {
     return res.status(400).send('Invalid boardId');
   }

@@ -16,7 +16,7 @@ import { formatNumber } from './utils/formatters.jsx';
 const PAGE_SIZE = 200;
 const APPLY_AVAILABLE = true;
 const AUTH_EXPIRED_MESSAGE = 'Session expired. Reload the app.';
-const OAUTH_REQUIRED_MESSAGE = 'Account not connected. Reconnect to continue.';
+const OAUTH_REQUIRED_MESSAGE = 'Connect Mustard to Monday to continue.';
 const ONBOARDING_KEY = 'mustard_bfr_seen_onboarding';
 const DRY_RUN_KEY = 'mustard_bfr_dry_run';
 const META_CACHE_KEY = '__BFR_BOARD_META_CACHE';
@@ -239,51 +239,6 @@ export default function App() {
     return () => window.removeEventListener('message', handler);
   }, [API_BASE]);
 
-  useEffect(() => {
-    let mounted = true;
-    if (!boardId) return () => {};
-    if (typeof window === 'undefined') return () => {};
-    const cacheStore = window[META_CACHE_KEY] || {};
-    if (cacheStore[boardId]) {
-      setBoardMeta(cacheStore[boardId]);
-      setMetaLoading(false);
-      return () => {};
-    }
-    setMetaLoading(true);
-    setMetaError('');
-    monday
-      .api(
-        `query($id: ID!) {
-          boards(ids: [$id]) {
-            columns { id title type }
-            groups { id title }
-          }
-        }`,
-        { variables: { id: boardId } }
-      )
-      .then((res) => {
-        if (!mounted) return;
-        const board = res?.data?.boards?.[0];
-        const nextMeta = {
-          columns: board?.columns || [],
-          groups: board?.groups || []
-        };
-        setBoardMeta(nextMeta);
-        window[META_CACHE_KEY] = { ...cacheStore, [boardId]: nextMeta };
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setMetaError(String(err?.message || err));
-        setBoardMeta({ columns: [], groups: [] });
-      })
-      .finally(() => {
-        if (mounted) setMetaLoading(false);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [boardId, monday]);
-
   const startAuthPoll = (accountId) => {
     if (authPollRef.current) clearInterval(authPollRef.current);
     let attempts = 0;
@@ -421,6 +376,9 @@ export default function App() {
         if (code === 'AUTH_NOT_CONNECTED' || code === 'AUTH_OAUTH_FAILED') {
           setAuthIssue('oauth');
           setError(OAUTH_REQUIRED_MESSAGE);
+        } else if (code === 'AUTH_SESSION_INVALID') {
+          setAuthIssue('session');
+          setError(AUTH_EXPIRED_MESSAGE);
         } else {
           setAuthIssue('session');
           setError(AUTH_EXPIRED_MESSAGE);
@@ -431,6 +389,66 @@ export default function App() {
     setAuthIssue(null);
     return result;
   };
+
+  useEffect(() => {
+    let mounted = true;
+    if (!boardId || !accountId) return () => {};
+    if (!hasApiBase) return () => {};
+    if (typeof window === 'undefined') return () => {};
+    const cacheStore = window[META_CACHE_KEY] || {};
+    if (cacheStore[boardId]) {
+      setBoardMeta(cacheStore[boardId]);
+      setMetaLoading(false);
+      return () => {};
+    }
+    setMetaLoading(true);
+    setMetaError('');
+    const query = `query($id: ID!) {
+      boards(ids: [$id]) {
+        columns { id title type }
+        groups { id title }
+      }
+    }`;
+    apiRequest({
+      path: '/api/graphql',
+      body: {
+        accountId: String(accountId),
+        query,
+        variables: { id: boardId }
+      }
+    })
+      .then((result) => {
+        if (!mounted || !result) return;
+        if (!result.response.ok) {
+          setMetaError('Unable to load fields or groups.');
+          return;
+        }
+        let data;
+        try {
+          data = result.text ? JSON.parse(result.text) : null;
+        } catch {
+          data = null;
+        }
+        const board = data?.data?.boards?.[0];
+        const nextMeta = {
+          columns: board?.columns || [],
+          groups: board?.groups || []
+        };
+        setBoardMeta(nextMeta);
+        window[META_CACHE_KEY] = { ...cacheStore, [boardId]: nextMeta };
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setMetaError(String(err?.message || err));
+        setBoardMeta({ columns: [], groups: [] });
+      })
+      .finally(() => {
+        if (mounted) setMetaLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [boardId, accountId, hasApiBase]);
 
   const setDryRunPreference = (value) => {
     setDryRun(value);
@@ -877,10 +895,10 @@ export default function App() {
             <div className="notice__row">
               <div>{OAUTH_REQUIRED_MESSAGE}</div>
               <button className="btn btn-primary" type="button" onClick={handleOAuthReconnect}>
-                Reconnect
+                Connect
               </button>
             </div>
-            <div className="muted">Reconnect your Monday account to continue.</div>
+            <div className="muted">Connect your Monday account to continue.</div>
           </InlineNotice>
         )}
 
