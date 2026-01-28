@@ -121,6 +121,9 @@ function AppContent() {
   const authPollRef = useRef(null);
 
   const debugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
+  const accountId = oauthAccountId;
+  const hasAccountId = Boolean(accountId);
+  const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
 
   useEffect(() => {
     window.__BFR_APP_LOADED = true;
@@ -450,10 +453,6 @@ function AppContent() {
     if (!ctxRaw) return;
     getSessionToken();
   }, [ctxRaw]);
-
-  const accountId = oauthAccountId;
-  const hasAccountId = Boolean(accountId);
-  const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
 
   const updateLastRequest = (payload) => {
     setLastRequest(payload);
