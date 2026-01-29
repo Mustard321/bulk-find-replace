@@ -32,12 +32,16 @@ app.use((req, _res, next) => {
 
 const signingSecret = (process.env.MONDAY_SIGNING_SECRET || '').trim();
 const clientSecret = (process.env.MONDAY_CLIENT_SECRET || '').trim();
+const clientId = (process.env.MONDAY_CLIENT_ID || '').trim();
 const signingSecretLen = signingSecret.length;
 const clientSecretLen = clientSecret.length;
+const clientIdLen = clientId.length;
 const signingSecretFp = secretFingerprint(signingSecret);
 const clientSecretFp = secretFingerprint(clientSecret);
+const clientIdFp = secretFingerprint(clientId);
 console.log('[env] MONDAY_SIGNING_SECRET present:', Boolean(signingSecret), 'len:', signingSecretLen, 'fp:', signingSecretFp);
 console.log('[env] MONDAY_CLIENT_SECRET present:', Boolean(clientSecret), 'len:', clientSecretLen, 'fp:', clientSecretFp);
+console.log('[env] MONDAY_CLIENT_ID present:', Boolean(clientId), 'len:', clientIdLen, 'fp:', clientIdFp);
 console.log('[env] ALLOWED_ORIGINS:', process.env.ALLOWED_ORIGINS);
 
 app.get('/__debug/ping', (_req, res) => {
@@ -55,6 +59,21 @@ app.get('/__debug/version', (_req, res) => {
   res.json({ ok: true, sha, service });
 });
 
+app.get('/api/auth/diag', (_req, res) => {
+  const previewUrl = new URL('https://auth.monday.com/oauth2/authorize');
+  if (clientId) previewUrl.searchParams.set('client_id', clientId);
+  previewUrl.searchParams.set('redirect_uri', redirectUri);
+  res.json({
+    hasClientId: Boolean(clientId),
+    hasClientSecret: Boolean(clientSecret),
+    hasSigningSecret: Boolean(signingSecret),
+    computedRedirectUri: redirectUri,
+    serverBaseUrl,
+    mondayAuthorizeUrlPreview: previewUrl.toString(),
+    note: 'If hasClientId is false, OAuth cannot work.'
+  });
+});
+
 const requiredEnv = ['SERVER_BASE_URL', 'ALLOWED_ORIGINS', 'MONDAY_CLIENT_ID', 'MONDAY_CLIENT_SECRET'];
 const missingEnv = requiredEnv.filter(k => !process.env[k]);
 if (missingEnv.length) {
@@ -63,11 +82,64 @@ if (missingEnv.length) {
 
 const port = process.env.PORT || 3001;
 const serverBaseUrl = process.env.SERVER_BASE_URL;
-const redirectUri = `${serverBaseUrl}/auth/callback`;
+const redirectPath = '/api/auth/callback';
+const redirectUri = `${serverBaseUrl}${redirectPath}`;
+const legacyRedirectUri = `${serverBaseUrl}/auth/callback`;
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
+
+const base64UrlEncode = (input) => Buffer.from(input).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+const base64UrlDecode = (input) => {
+  const normalized = String(input || '').replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+  return Buffer.from(padded, 'base64').toString('utf8');
+};
+const timingSafeEqual = (a, b) => {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+};
+const oauthStateSecret = clientSecret || signingSecret;
+const signState = (payloadB64) =>
+  base64UrlEncode(crypto.createHmac('sha256', oauthStateSecret).update(payloadB64).digest());
+const buildState = (payload) => {
+  if (!oauthStateSecret) return null;
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const sig = signState(payloadB64);
+  return `${payloadB64}.${sig}`;
+};
+const verifyState = (state) => {
+  if (!state || !oauthStateSecret) return { payload: null, error: 'MISSING_STATE' };
+  const [payloadB64, sig] = String(state).split('.');
+  if (!payloadB64 || !sig) return { payload: null, error: 'STATE_FORMAT' };
+  const expected = signState(payloadB64);
+  if (!timingSafeEqual(sig, expected)) return { payload: null, error: 'STATE_SIGNATURE' };
+  try {
+    const payload = JSON.parse(base64UrlDecode(payloadB64));
+    return { payload, error: null };
+  } catch {
+    return { payload: null, error: 'STATE_DECODE' };
+  }
+};
+const isValidAccountId = (value) => {
+  const text = String(value || '').trim();
+  return /^\d+$/.test(text) ? text : null;
+};
+const sanitizeReturnUrl = (value) => {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:') return null;
+    if (!allowedOrigins.includes(url.origin)) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+};
+const getDefaultReturnUrl = () => allowedOrigins[0] || serverBaseUrl;
 
 const isAllowedOrigin = origin => {
   if (!origin) return true;
@@ -394,82 +466,84 @@ app.get('/health', (_, res) => {
   res.json({ ok: true, serverBaseUrl, redirectUri });
 });
 
-app.get('/auth/authorize', (req, res) => {
-  const accountId = req.query?.accountId;
+const oauthAuthorizeHandler = (req, res) => {
+  const accountId = isValidAccountId(req.query?.accountId);
   if (!accountId) {
-    return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
+    return res.status(400).send('Missing accountId');
   }
-  console.log(`[OAUTH] authorize hit accountId=${accountId}`);
+  if (!clientId || !clientSecret) {
+    return res.status(500).send('OAuth misconfigured');
+  }
+  const returnUrl = sanitizeReturnUrl(req.query?.returnUrl) || getDefaultReturnUrl();
+  const state = buildState({
+    accountId,
+    returnUrl,
+    nonce: crypto.randomBytes(16).toString('hex'),
+    issuedAt: Date.now()
+  });
+  if (!state) {
+    return res.status(500).send('OAuth misconfigured');
+  }
+  console.log(`[oauth-authorize] accountId=${accountId} redirect_uri=${redirectUri}`);
   const url = new URL('https://auth.monday.com/oauth2/authorize');
-  url.searchParams.set('client_id', process.env.MONDAY_CLIENT_ID);
+  url.searchParams.set('client_id', clientId);
   url.searchParams.set('redirect_uri', redirectUri);
-  const nonce = crypto.randomBytes(16).toString('hex');
-  const state = `${String(accountId)}.${nonce}`;
   url.searchParams.set('state', state);
-  console.log(`[OAUTH] authorize start accountId=${accountId} state=${state}`);
   res.redirect(url.toString());
-});
+};
 
-app.get('/auth/callback', async (req, res) => {
+const oauthCallbackHandler = async (req, res) => {
   console.log(`[OAUTH] callback hit hasCode=${Boolean(req.query.code)} hasState=${Boolean(req.query.state)}`);
   const { code, error, error_description, state } = req.query;
   const authCode = Array.isArray(code) ? code[0] : code;
   const stateValue = Array.isArray(state) ? state[0] : state;
-  const stateString = stateValue ? String(stateValue) : '';
-  const stateAccountId = stateString.split('.')[0];
-  if (error) return res.status(400).send(String(error_description || error));
-  if (!authCode) return res.status(400).send('Missing code');
+  if (error) {
+    console.log(`[oauth-callback] accountId=unknown ok=false reason=${String(error_description || error)}`);
+    return res.status(400).send(String(error_description || error));
+  }
+  if (!authCode) {
+    console.log('[oauth-callback] accountId=unknown ok=false reason=Missing code');
+    return res.status(400).send('Missing code');
+  }
+  const { payload, error: stateError } = verifyState(stateValue);
+  const accountId = isValidAccountId(payload?.accountId);
+  if (!payload || stateError || !accountId) {
+    console.log(`[oauth-callback] accountId=unknown ok=false reason=${stateError || 'STATE_INVALID'}`);
+    return res.status(400).send('Invalid state');
+  }
+  const ageMs = Date.now() - Number(payload.issuedAt || 0);
+  if (!payload.issuedAt || Number.isNaN(ageMs) || ageMs > 10 * 60 * 1000) {
+    console.log(`[oauth-callback] accountId=${accountId} ok=false reason=STATE_EXPIRED`);
+    return res.status(400).send('State expired');
+  }
+  const safeReturnUrl = sanitizeReturnUrl(payload.returnUrl) || getDefaultReturnUrl();
   try {
     const r = await axios.post('https://auth.monday.com/oauth2/token', {
-      client_id: process.env.MONDAY_CLIENT_ID,
-      client_secret: process.env.MONDAY_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
       code: authCode,
       redirect_uri: redirectUri
     });
     const accessToken = r.data?.access_token;
     if (!accessToken) {
+      console.log(`[oauth-callback] accountId=${accountId} ok=false reason=MISSING_ACCESS_TOKEN`);
       return res.status(500).json({ ok: false, error: 'MISSING_ACCESS_TOKEN' });
     }
-    let tokenAccountId = r.data?.account_id;
-    let source = 'token_response';
-    if (!tokenAccountId && stateAccountId) {
-      tokenAccountId = stateAccountId;
-      source = 'state';
-    }
-    const queryAccountId = Array.isArray(req.query.accountId) ? req.query.accountId[0] : req.query.accountId;
-    if (!tokenAccountId && queryAccountId) {
-      tokenAccountId = queryAccountId;
-      source = 'query';
-    }
-    if (!tokenAccountId) {
-      console.log('[OAUTH] callback missing accountId');
-      return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
-    }
-    console.log(`[OAUTH] callback accountIdUsed=${tokenAccountId} source=${source} hasCode=${Boolean(authCode)} hasState=${Boolean(stateValue)}`);
-    saveToken(String(tokenAccountId), accessToken);
-    console.log(`[OAUTH] token ok account_id=${tokenAccountId} stored=true source=${source}`);
-    res.send(`<!doctype html>
-<html>
-  <body>
-    Authorized. You can close this tab.
-    <script>
-      (function () {
-        try {
-          if (window.opener) {
-            window.opener.postMessage({ type: "mustard_oauth_success", accountId: "${tokenAccountId}" }, "*");
-            window.opener.postMessage({ type: "BFR_OAUTH_OK", accountId: "${tokenAccountId}" }, "*");
-          }
-        } catch (e) {}
-        try { window.close(); } catch (e) {}
-      })();
-    </script>
-  </body>
-</html>`);
+    const tokenAccountId = String(r.data?.account_id || accountId);
+    saveToken(tokenAccountId, accessToken);
+    console.log(`[oauth-callback] accountId=${tokenAccountId} ok=true`);
+    return res.redirect(safeReturnUrl);
   } catch (err) {
+    console.log(`[oauth-callback] accountId=${accountId} ok=false reason=EXCHANGE_FAILED`);
     console.error(`[OAUTH] callback error ${err.message}`);
-    res.status(500).send('OAuth exchange failed');
+    return res.status(500).send('OAuth exchange failed');
   }
-});
+};
+
+app.get('/api/auth/authorize', oauthAuthorizeHandler);
+app.get('/auth/authorize', oauthAuthorizeHandler);
+app.get('/api/auth/callback', oauthCallbackHandler);
+app.get('/auth/callback', oauthCallbackHandler);
 
 app.post('/api/graphql', rateLimit, async (req, res) => {
   const accountInfo = deriveAccountId(req);

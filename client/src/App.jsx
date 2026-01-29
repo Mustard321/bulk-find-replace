@@ -123,7 +123,11 @@ function AppContent() {
   const debugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
   const accountId = oauthAccountId;
   const hasAccountId = Boolean(accountId);
-  const authorizeUrl = hasApiBase && hasAccountId ? `${API_BASE.replace(/\/$/, '')}/auth/authorize?accountId=${encodeURIComponent(accountId)}` : '';
+  const returnUrl = typeof window !== 'undefined' ? window.location.href : '';
+  const authorizeUrl =
+    hasApiBase && hasAccountId
+      ? `${API_BASE.replace(/\/$/, '')}/api/auth/authorize?accountId=${encodeURIComponent(accountId)}${returnUrl ? `&returnUrl=${encodeURIComponent(returnUrl)}` : ''}`
+      : '';
 
   useEffect(() => {
     window.__BFR_APP_LOADED = true;
@@ -497,16 +501,17 @@ function AppContent() {
       setError('Authorization URL is unavailable. Check VITE_API_BASE_URL.');
       return;
     }
-    let opened = false;
-    try {
-      monday.execute?.('openLink', { url: authorizeUrl, target: 'newTab' });
-      opened = true;
-    } catch {}
-    if (!opened) {
-      const popup = window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
-      if (!popup) {
-        setPopupBlocked(true);
-        return;
+    console.info('[oauth] reconnect clicked');
+    const popup = window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
+    if (popup) {
+      console.info('[oauth] launch method=window.open');
+    } else {
+      setPopupBlocked(true);
+      console.info('[oauth] launch method=window.location.assign');
+      try {
+        window.top?.location?.assign(authorizeUrl);
+      } catch {
+        window.location.assign(authorizeUrl);
       }
     }
     startAuthPoll(accountId);
