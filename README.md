@@ -14,7 +14,7 @@
 ### Deploy overview
 - Client: Vercel (Vite)
 - Server: Render (Node/Express)
-- Token storage: Supabase Postgres (production), SQLite `server/tokens.db` (local dev)
+- Token storage: SQLite (Render persistent disk) + SQLite `server/tokens.db` (local dev)
 
 ### OAuth / Monday
 - Feature URL: Vercel client URL
@@ -24,6 +24,12 @@
 - Confirm `.env` files are gitignored.
 - Confirm no secrets are committed.
 - Use Supabase service role key only on the server.
+
+### Render persistent disk (tokens)
+Render instances are ephemeral. To persist OAuth tokens:
+- Create a Render Disk mounted at `/var/data`.
+- Set `TOKENS_DB_PATH=/var/data/tokens.db` in Render env vars.
+- Restart the Render service.
 
 ### Rotating Monday client secret
 - Update `MONDAY_CLIENT_SECRET` in Render environment variables.

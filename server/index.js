@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 
@@ -110,8 +111,16 @@ app.use(express.json({ limit: '1mb' }));
 
 const getTokensDbPath = () => {
   const configured = (process.env.TOKENS_DB_PATH || '').trim();
+  if (configured) return path.resolve(configured);
+  const persistentDir = '/var/data';
   const fallback = path.join(process.cwd(), 'tokens.db');
-  return path.resolve(configured || fallback);
+  try {
+    fs.mkdirSync(persistentDir, { recursive: true });
+    return path.resolve(path.join(persistentDir, 'tokens.db'));
+  } catch (err) {
+    console.warn('[env] TOKENS_DB_PATH persistent mkdir failed, falling back to local tokens.db', err?.message || err);
+    return path.resolve(fallback);
+  }
 };
 const resolvedDbPath = getTokensDbPath();
 console.log('[env] TOKENS_DB_PATH:', resolvedDbPath);
@@ -138,8 +147,13 @@ try { db.prepare('ALTER TABLE audit_log ADD COLUMN item_name TEXT').run(); } cat
 try { db.prepare('ALTER TABLE audit_log ADD COLUMN column_title TEXT').run(); } catch {}
 
 const saveToken = (id, token) => {
-  db.prepare('INSERT OR REPLACE INTO tokens VALUES (?, ?)').run(id, token);
-  console.log(`[oauth] tokenStored=true accountId=${id} tokensDbPath=${resolvedDbPath}`);
+  try {
+    db.prepare('INSERT OR REPLACE INTO tokens VALUES (?, ?)').run(id, token);
+    console.log(`[oauth] tokenStored=true accountId=${id} tokensDbPath=${resolvedDbPath}`);
+  } catch (err) {
+    console.log(`[oauth] tokenStored=false accountId=${id} tokensDbPath=${resolvedDbPath} reason=${err?.message || err}`);
+    throw err;
+  }
 };
 
 const getToken = id => {
@@ -385,6 +399,7 @@ app.get('/auth/authorize', (req, res) => {
   if (!accountId) {
     return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
   }
+  console.log(`[OAUTH] authorize hit accountId=${accountId}`);
   const url = new URL('https://auth.monday.com/oauth2/authorize');
   url.searchParams.set('client_id', process.env.MONDAY_CLIENT_ID);
   url.searchParams.set('redirect_uri', redirectUri);
@@ -430,6 +445,7 @@ app.get('/auth/callback', async (req, res) => {
       console.log('[OAUTH] callback missing accountId');
       return res.status(400).json({ ok: false, error: 'MISSING_ACCOUNT_ID' });
     }
+    console.log(`[OAUTH] callback accountIdUsed=${tokenAccountId} source=${source} hasCode=${Boolean(authCode)} hasState=${Boolean(stateValue)}`);
     saveToken(String(tokenAccountId), accessToken);
     console.log(`[OAUTH] token ok account_id=${tokenAccountId} stored=true source=${source}`);
     res.send(`<!doctype html>
